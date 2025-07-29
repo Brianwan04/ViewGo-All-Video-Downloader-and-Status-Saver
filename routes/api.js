@@ -12,6 +12,11 @@ const asyncHandler = (fn) => (req, res, next) => {
     .catch(next);
 };
 
+app.get('/', (req, res) => {
+  res.send("🎉 ViewGo API is running!");
+});
+
+
 // Search endpoint
 router.post('/search', validateSearchInput, async (req, res) => {
   const { query } = req.body;
