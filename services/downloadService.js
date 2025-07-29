@@ -329,42 +329,23 @@ const streamVideoDirectly = async (req, res) => {
 // New: Stream video to frontend directly without saving to disk
 const streamDownload = async (url, format, res) => {
   try {
-    // Set response headers for video streaming
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', 'attachment; filename="video.mp4"');
 
-    // Spawn yt-dlp as a child process
-    const { spawn } = require('child_process');
-    const args = [
-      url,
-      '-f', format || 'best',
-      '-o', '-', // 🔥 Output to stdout
-      '--no-part', // avoid .part files
-      '--no-check-certificate'
-    ];
-
-    const ytdlProc = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-
-    // Pipe stdout (video data) directly to HTTP response
-    ytdlProc.stdout.pipe(res);
-
-    // Optional: capture stderr for logs
-    ytdlProc.stderr.on('data', data => {
-      console.error('yt-dlp:', data.toString());
+    const stream = ytdl.execStream(url, {
+      format: format || 'best',
+      output: '-', // stdout
+      noCheckCertificates: true,
+      noWarnings: true,
+      noPart: true
     });
 
-    ytdlProc.on('error', (err) => {
-      console.error('Failed to spawn yt-dlp:', err.message);
-      if (!res.headersSent) res.status(500).end('yt-dlp spawn failed');
-    });
+    stream.pipe(res);
 
-    ytdlProc.on('close', (code) => {
-      if (code !== 0) {
-        console.error(`yt-dlp exited with code ${code}`);
-        if (!res.headersSent) res.status(500).end('yt-dlp failed');
-      }
+    stream.on('error', (err) => {
+      console.error('yt-dlp error:', err.message);
+      if (!res.headersSent) res.status(500).end('yt-dlp stream failed');
     });
-
   } catch (err) {
     console.error('Streaming error:', err.message);
     if (!res.headersSent) {
