@@ -1,3 +1,6 @@
+const path = require('path');
+process.env.PATH = `${process.env.PATH}:${path.join(__dirname, 'bin')}`;
+
 require('dotenv').config();
 const express = require('express');
 const morgan = require('morgan');

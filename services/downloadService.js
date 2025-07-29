@@ -1,6 +1,7 @@
 // services/downloadService.js
 const ytdl = require('yt-dlp-exec');
 const path = require('path');
+const ytdlPath = path.join(__dirname, '../bin/yt-dlp');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const EventEmitter = require('events');
@@ -299,12 +300,13 @@ const streamVideoDirectly = async (req, res) => {
 
   res.setHeader('Content-Type', 'video/mp4');
 
-  const ytdlProcess = ytdl.raw(url, [
+  const args = [
+    url,
     '-f', format,
-    '-o', '-', // Output to stdout
-    '--no-check-certificates',
-    '--no-warnings'
-  ]);
+    '-o', '-',
+    '--no-check-certificates'
+  ];
+  const ytdlProcess = spawn(ytdlPath, args);
 
   const passthrough = new PassThrough();
 
