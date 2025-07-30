@@ -84,7 +84,7 @@ const buildYtdlOptions = (url, extraOptions = {}) => {
 // Get available formats
 const getFormats = async (url) => {
   try {
-    const options = buildYtdlOptions(urlInfo, {
+    const options = buildYtdlOptions(url, {
       dumpSingleJson: true,
       preferFreeFormats: true
     });
@@ -107,7 +107,7 @@ const getFormats = async (url) => {
 
 // Get video preview with retry logic
 const getVideoPreview = async (url) => {
-  const maxRetries = 2;
+  const maxRetries = 3;
   let retries = 0;
   
   while (retries <= maxRetries) {
