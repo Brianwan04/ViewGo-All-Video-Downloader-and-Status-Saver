@@ -60,8 +60,8 @@ const buildPlatformOptions = (platform) => {
 };
 
 // Build ytdl options with platform config
-const buildYtdlOptions = (urlInfo, extraOptions = {}) => {
-  const { config } = urlInfo;
+const buildYtdlOptions = (url, extraOptions = {}) => {
+  const { config } = url;
   const baseOptions = {
     noCheckCertificates: true,
     noWarnings: true,
@@ -82,14 +82,14 @@ const buildYtdlOptions = (urlInfo, extraOptions = {}) => {
 };
 
 // Get available formats
-const getFormats = async (urlInfo) => {
+const getFormats = async (url) => {
   try {
     const options = buildYtdlOptions(urlInfo, {
       dumpSingleJson: true,
       preferFreeFormats: true
     });
 
-    const info = await ytdl(urlInfo.url, options);
+    const info = await ytdl(url, options);
 
     return info.formats
       .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
@@ -106,7 +106,7 @@ const getFormats = async (urlInfo) => {
 };
 
 // Get video preview with retry logic
-const getVideoPreview = async (urlInfo) => {
+const getVideoPreview = async (url) => {
   const maxRetries = 2;
   let retries = 0;
   
@@ -115,13 +115,13 @@ const getVideoPreview = async (urlInfo) => {
       const options = {
       dumpSingleJson: true,
       skipDownload: true,
-      ...buildPlatformOptions(urlInfo.platform) // Applies platform-specific config
+      ...buildPlatformOptions(url.platform) 
     };
 
-      const info = await ytdl(urlInfo.url, options);
+      const info = await ytdl(url, options);
       
       return {
-        id: info.id || urlInfo.url,
+        id: info.id || url,
         title: info.title,
         thumbnail: info.thumbnail,
         duration: info.duration,
@@ -144,15 +144,15 @@ const getVideoPreview = async (urlInfo) => {
 };
 
 // Get stream URL
-const getStreamUrl = async (urlInfo, format) => {
+const getStreamUrl = async (url, format) => {
   const options = {
     format: format || 'best',
     output: '-', // Stream to stdout
     mergeOutputFormat: 'mp4',
-    ...buildPlatformOptions(urlInfo.platform)
+    ...buildPlatformOptions(url.platform)
   };
 
-  const info = await ytdl(urlInfo.url, options);
+  const info = await ytdl(url, options);
 
   // 1) Prefer HLS (manifest) formats
   const hlsFormat = info.formats.find(f =>
@@ -199,7 +199,7 @@ const getStreamUrl = async (urlInfo, format) => {
 };
 
 // Start a download
-const startDownload = async (urlInfo, format) => {
+const startDownload = async (url, format) => {
   const id = uuidv4();
   const output = path.join(DOWNLOAD_DIR, `${id}.%(ext)s`);
 
@@ -210,7 +210,7 @@ const startDownload = async (urlInfo, format) => {
   // Store initial state
   downloads.set(id, {
     id,
-    url: urlInfo.url,
+    url: url,
     format,
     status: 'downloading',
     progress: 0,
@@ -221,7 +221,7 @@ const startDownload = async (urlInfo, format) => {
   // Run download in background
   (async () => {
     try {
-      const options = buildYtdlOptions(urlInfo);
+      const options = buildYtdlOptions(url);
       const args = [
         urlInfo.url,
         '-o', output,
@@ -379,17 +379,17 @@ const scheduleFileDeletion = (filePath) => {
 };
 
 // Stream video to frontend directly
-const streamDownload = async (urlInfo, format, res) => {
+const streamDownload = async (url, format, res) => {
   try {
     // Get video metadata
     const options = {
     format: format || 'best',
     output: '-', // Stream to stdout
     mergeOutputFormat: 'mp4',
-    ...buildPlatformOptions(urlInfo.platform)
+    ...buildPlatformOptions(url.platform)
   };
     
-    const info = await ytdl(urlInfo.url, options);
+    const info = await ytdl(url, options);
     
     const safeTitle = info.title.replace(/[^\w\s]/gi, '');
     const extension = format && format.includes('mp4') ? 'mp4' : 'mp4';
@@ -400,7 +400,7 @@ const streamDownload = async (urlInfo, format, res) => {
 
     // Build arguments
     const args = [
-      urlInfo.url,
+      url,
       '-f', format || 'best',
       '-o', '-',
       '--no-part',
@@ -409,17 +409,17 @@ const streamDownload = async (urlInfo, format, res) => {
     ];
 
     // Add platform-specific options
-    if (urlInfo.config.cookies) {
-      args.push('--cookies', urlInfo.config.cookies);
+    if (url.config.cookies) {
+      args.push('--cookies', url.config.cookies);
     }
-    if (urlInfo.config.proxy) {
-      args.push('--proxy', urlInfo.config.proxy);
+    if (url.config.proxy) {
+      args.push('--proxy', url.config.proxy);
     }
-    if (urlInfo.config.userAgent) {
-      args.push('--user-agent', urlInfo.config.userAgent);
+    if (url.config.userAgent) {
+      args.push('--user-agent', url.config.userAgent);
     }
-    if (urlInfo.config.referer) {
-      args.push('--referer', urlInfo.config.referer);
+    if (url.config.referer) {
+      args.push('--referer', url.config.referer);
     }
 
     // Spawn yt-dlp process
