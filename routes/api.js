@@ -107,7 +107,6 @@ router.use((err, req, res, next) => {
   }
 });
 
-// Change the route to use validateUrlInput middleware
 router.get('/stream-download', validateUrlInput, async (req, res) => {
   const { url, format } = req.query;
   await downloadService.streamDownload(url, format, res);
