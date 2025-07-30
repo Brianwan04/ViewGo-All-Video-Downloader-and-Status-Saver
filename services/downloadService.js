@@ -1,4 +1,3 @@
-// services/downloadService.js
 const ytdl = require('yt-dlp-exec');
 const path = require('path');
 const ytdlPath = path.join(__dirname, '../bin/yt-dlp');
@@ -17,19 +16,83 @@ const progressEmitters = new Map();
 
 class DownloadProgressEmitter extends EventEmitter {}
 
+// Platform-specific configuration templates
+const PLATFORM_CONFIGS = {
+  youtube: {
+    extractorArgs: {
+      youtube: {
+        skip_webpage: true,
+        player_client: "android"
+      }
+    },
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    referer: "https://www.youtube.com/"
+  },
+  instagram: {
+    userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+    referer: "https://www.instagram.com/",
+    forceIpv4: true,
+    proxy: process.env.INSTAGRAM_PROXY || ""
+  },
+  facebook: {
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    extractorArgs: {
+      facebook: {
+        skip_auth: true,
+        skip_web_fallback: true
+      }
+    }
+  },
+  default: {
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    referer: "https://www.google.com/"
+  }
+};
+
+// Unified function to build options
+const buildPlatformOptions = (platform) => {
+  return {
+    noCheckCertificates: true,
+    noWarnings: true,
+    ...PLATFORM_CONFIGS[platform],
+    ...PLATFORM_CONFIGS.default // Fallback to defaults
+  };
+};
+
+// Build ytdl options with platform config
+const buildYtdlOptions = (urlInfo, extraOptions = {}) => {
+  const { config } = urlInfo;
+  const baseOptions = {
+    noCheckCertificates: true,
+    noWarnings: true,
+    ...config
+  };
+
+  // Add cookies if available
+  if (config.cookies && config.cookies.trim() !== '') {
+    baseOptions.cookies = config.cookies;
+  }
+
+  // Add proxy if available
+  if (config.proxy && config.proxy.trim() !== '') {
+    baseOptions.proxy = config.proxy;
+  }
+
+  return { ...baseOptions, ...extraOptions };
+};
+
 // Get available formats
-const getFormats = async (url) => {
-  url = validateUrl(url);
+const getFormats = async (urlInfo) => {
   try {
-    const info = await ytdl(url, {
+    const options = buildYtdlOptions(urlInfo, {
       dumpSingleJson: true,
-      noCheckCertificates: true,
-      noWarnings: true,
-      preferFreeFormats: true,
+      preferFreeFormats: true
     });
 
+    const info = await ytdl(urlInfo.url, options);
+
     return info.formats
-      .filter(f => f.vcodec !== 'none' && f.acodec !== 'none') // ✅ Ensure both video & audio
+      .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
       .map(f => ({
         format_id: f.format_id,
         ext: f.ext,
@@ -42,61 +105,60 @@ const getFormats = async (url) => {
   }
 };
 
-
-// Get video preview
-const getVideoPreview = async (url) => {
-  url = validateUrl(url);
-  try {
-    const options = {
+// Get video preview with retry logic
+const getVideoPreview = async (urlInfo) => {
+  const maxRetries = 2;
+  let retries = 0;
+  
+  while (retries <= maxRetries) {
+    try {
+      const options = {
       dumpSingleJson: true,
-      noCheckCertificates: true,
-      noWarnings: true,
       skipDownload: true,
+      ...buildPlatformOptions(urlInfo.platform) // Applies platform-specific config
     };
 
-    // Add special options for problematic platforms
-    if (url.includes('youtube.com') || url.includes('youtu.be')) {
-      options.forceIpv4 = true;
-      options.geoBypass = true;
+      const info = await ytdl(urlInfo.url, options);
+      
+      return {
+        id: info.id || urlInfo.url,
+        title: info.title,
+        thumbnail: info.thumbnail,
+        duration: info.duration,
+        platform: info.extractor_key,
+        uploader: info.uploader,
+        view_count: info.view_count,
+      };
+    } catch (error) {
+      retries++;
+      
+      if (retries > maxRetries) {
+        console.error('Preview error:', error);
+        throw new Error('Failed to get video preview: ' + error.message);
+      }
+      
+      // Add delay before retrying
+      await new Promise(resolve => setTimeout(resolve, 1000 * retries));
     }
-    
-    if (url.includes('instagram.com')) {
-      options.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
-    }
-
-    const info = await ytdl(url, options);
-    
-    return {
-      id: info.id || url,
-      title: info.title,
-      thumbnail: info.thumbnail,
-      duration: info.duration,
-      platform: info.extractor_key,
-      uploader: info.uploader,
-      view_count: info.view_count,
-    };
-  } catch (error) {
-    console.error('Preview error:', error);
-    throw new Error('Failed to get video preview: ' + error.message);
   }
 };
 
 // Get stream URL
-const getStreamUrl = async (url, format) => {
-  url = validateUrl(url);
+const getStreamUrl = async (urlInfo, format) => {
+  const options = {
+    format: format || 'best',
+    output: '-', // Stream to stdout
+    mergeOutputFormat: 'mp4',
+    ...buildPlatformOptions(urlInfo.platform)
+  };
 
-  // Ask ytdl to list all formats (no download)
-  const info = await ytdl(url, {
-    dumpSingleJson: true,
-    noCheckCertificates: true,
-    noWarnings: true,
-    skipDownload: true
-  });
+  const info = await ytdl(urlInfo.url, options);
 
   // 1) Prefer HLS (manifest) formats
   const hlsFormat = info.formats.find(f =>
-    f.ext === 'm3u8_native' || (f.protocol === 'm3u8_native') || (f.url && f.url.includes('.m3u8'))
+    f.ext === 'm3u8_native' || f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))
   );
+  
   if (hlsFormat && hlsFormat.url) {
     return {
       url: hlsFormat.url,
@@ -106,7 +168,7 @@ const getStreamUrl = async (url, format) => {
     };
   }
 
-  // 2) Otherwise, if caller specified a format, use that
+  // 2) Use requested format if available
   if (format) {
     const chosen = info.formats.find(f => f.format_id === format);
     if (chosen && chosen.url) {
@@ -119,7 +181,7 @@ const getStreamUrl = async (url, format) => {
     }
   }
 
-  // 3) Fallback: best progressive MP4
+  // 3) Fallback to best progressive format
   const progressive = info.formats
     .filter(f => f.protocol === 'https' && f.vcodec !== 'none' && f.acodec !== 'none')
     .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
@@ -136,10 +198,8 @@ const getStreamUrl = async (url, format) => {
   throw new Error('No suitable stream format found');
 };
 
-
 // Start a download
-const startDownload = async (url, format) => {
-  url = validateUrl(url);
+const startDownload = async (urlInfo, format) => {
   const id = uuidv4();
   const output = path.join(DOWNLOAD_DIR, `${id}.%(ext)s`);
 
@@ -150,7 +210,7 @@ const startDownload = async (url, format) => {
   // Store initial state
   downloads.set(id, {
     id,
-    url,
+    url: urlInfo.url,
     format,
     status: 'downloading',
     progress: 0,
@@ -161,14 +221,28 @@ const startDownload = async (url, format) => {
   // Run download in background
   (async () => {
     try {
+      const options = buildYtdlOptions(urlInfo);
       const args = [
-        url,
+        urlInfo.url,
         '-o', output,
-        '--no-check-certificates',
       ];
       
       if (format) {
         args.push('-f', format);
+      }
+
+      // Add platform-specific options
+      if (options.cookies) {
+        args.push('--cookies', options.cookies);
+      }
+      if (options.proxy) {
+        args.push('--proxy', options.proxy);
+      }
+      if (options.userAgent) {
+        args.push('--user-agent', options.userAgent);
+      }
+      if (options.referer) {
+        args.push('--referer', options.referer);
       }
 
       const ytdlProcess = ytdl.exec(args);
@@ -207,15 +281,14 @@ const startDownload = async (url, format) => {
       downloads.get(id).status = 'error';
       downloads.get(id).error = error.message;
       console.error('[Download Error]', error);
-progressEmitter.emit('error', error.message || 'Unknown error');
-
+      progressEmitter.emit('error', error.message || 'Unknown error');
     }
   })();
 
   return id;
 };
 
-// Setup SSE stream - FIXED VERSION
+// Setup SSE stream
 const setupProgressStream = (id, res) => {
   const progressEmitter = progressEmitters.get(id);
   if (!progressEmitter) {
@@ -274,7 +347,6 @@ const setupProgressStream = (id, res) => {
     sendEvent('error', { error: safeError });
   };
   
-
   progressEmitter.on('progress', onProgress);
   progressEmitter.on('completed', onCompleted);
   progressEmitter.on('error', onError);
@@ -306,64 +378,29 @@ const scheduleFileDeletion = (filePath) => {
   }, retentionMinutes * 60 * 1000);
 };
 
-const { PassThrough } = require('stream');
-
-const streamVideoDirectly = async (req, res) => {
-  const url = validateUrl(req.query.url);
-  const format = req.query.format || 'best';
-
-  res.setHeader('Content-Type', 'video/mp4');
-
-  const args = [
-    url,
-    '-f', format,
-    '-o', '-',
-    '--no-check-certificates'
-  ];
-  const ytdlProcess = spawn(ytdlPath, args);
-
-  const passthrough = new PassThrough();
-
-  ytdlProcess.stdout.pipe(passthrough).pipe(res);
-
-  ytdlProcess.stderr.on('data', (data) => {
-    console.log('[yt-dlp stderr]', data.toString());
-  });
-
-  ytdlProcess.on('error', (err) => {
-    console.error('[yt-dlp stream error]', err);
-    if (!res.headersSent) res.status(500).end('Stream error');
-  });
-
-  ytdlProcess.on('close', (code) => {
-    if (code !== 0) {
-      console.error(`[yt-dlp] exited with code ${code}`);
-    }
-  });
-};
-
-// New: Stream video to frontend directly without saving to disk
-const streamDownload = async (url, format, res) => {
+// Stream video to frontend directly
+const streamDownload = async (urlInfo, format, res) => {
   try {
-    url = validateUrl(url);
+    // Get video metadata
+    const options = {
+    format: format || 'best',
+    output: '-', // Stream to stdout
+    mergeOutputFormat: 'mp4',
+    ...buildPlatformOptions(urlInfo.platform)
+  };
     
-    // Get video metadata for filename
-    const info = await ytdl(url, {
-      dumpSingleJson: true,
-      skipDownload: true,
-      noWarnings: true
-    });
+    const info = await ytdl(urlInfo.url, options);
     
     const safeTitle = info.title.replace(/[^\w\s]/gi, '');
-    const extension = format && format.includes('mp4') ? 'mp4' : 'mp4'; // Default to mp4
+    const extension = format && format.includes('mp4') ? 'mp4' : 'mp4';
     
     // Set proper headers
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
-    
-    // Use absolute path to yt-dlp binary
+
+    // Build arguments
     const args = [
-      url,
+      urlInfo.url,
       '-f', format || 'best',
       '-o', '-',
       '--no-part',
@@ -371,12 +408,26 @@ const streamDownload = async (url, format, res) => {
       '--merge-output-format', 'mp4'
     ];
 
-    // 🔥 CRITICAL FIX: Use the correct binary path
+    // Add platform-specific options
+    if (urlInfo.config.cookies) {
+      args.push('--cookies', urlInfo.config.cookies);
+    }
+    if (urlInfo.config.proxy) {
+      args.push('--proxy', urlInfo.config.proxy);
+    }
+    if (urlInfo.config.userAgent) {
+      args.push('--user-agent', urlInfo.config.userAgent);
+    }
+    if (urlInfo.config.referer) {
+      args.push('--referer', urlInfo.config.referer);
+    }
+
+    // Spawn yt-dlp process
     const ytdlProc = spawn(ytdlPath, args, {
-      stdio: ['ignore', 'pipe', 'pipe'] // Only pipe stdout
+      stdio: ['ignore', 'pipe', 'pipe']
     });
 
-    // 🔥 Only pipe stdout to response
+    // Pipe stdout to response
     ytdlProc.stdout.pipe(res);
 
     // Handle errors
@@ -389,7 +440,6 @@ const streamDownload = async (url, format, res) => {
       if (!res.headersSent) res.status(500).end('Download failed');
     });
 
-    // Handle process exit
     ytdlProc.on('close', (code) => {
       if (code !== 0) {
         console.error(`yt-dlp exited with code ${code}`);
@@ -404,6 +454,14 @@ const streamDownload = async (url, format, res) => {
       }
     });
 
+    // Set timeout to prevent hanging
+    res.setTimeout(300000, () => {
+      if (!res.headersSent) {
+        res.status(504).end('Download timeout');
+        ytdlProc.kill('SIGTERM');
+      }
+    });
+
   } catch (err) {
     console.error('Streaming error:', err);
     if (!res.headersSent) {
@@ -411,8 +469,6 @@ const streamDownload = async (url, format, res) => {
     }
   }
 };
-
-// Export all functions
 
 module.exports = {
   getFormats,
@@ -422,6 +478,5 @@ module.exports = {
   setupProgressStream,
   getDownloadStatus,
   scheduleFileDeletion,
-  streamVideoDirectly,
   streamDownload
 };
