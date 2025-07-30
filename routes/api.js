@@ -114,6 +114,11 @@ router.get('/stream-download', async (req, res) => {
     return res.status(400).json({ error: 'URL is required' });
   }
 
+  if (!/^https?:\/\//i.test(url)) {
+  url = 'https://' + url; // Force HTTPS if missing
+}
+
+
   await downloadService.streamDownload(url, format, res);
 });
 
