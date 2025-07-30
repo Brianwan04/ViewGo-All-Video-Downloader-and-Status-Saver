@@ -1,4 +1,3 @@
-// routes/api.js
 const express = require('express');
 const router = express.Router();
 const { validateSearchInput, validateUrlInput } = require('../utils/validation');
@@ -52,24 +51,13 @@ router.get('/preview', validateUrlInput, async (req, res) => {
 // Download endpoint
 router.post('/download', validateUrlInput, asyncHandler(async (req, res) => {
   const { url, format } = req.body;
-  const downloadId = await downloadService.startDownload(url, format);
+  const downloadId = await downloadService.startDownload(req.validatedUrl, format);
   res.json({ id: downloadId });
 }));
 
-// SSE progress stream - FIXED
+// SSE progress stream
 router.get('/download/:id/progress', (req, res) => {
   const { id } = req.params;
-  
-  // Add SSE headers
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  
-  // Monkey-patch res.flush if missing
-  if (typeof res.flush !== 'function') {
-    res.flush = () => {}; // No-op function
-  }
-  
   downloadService.setupProgressStream(id, res);
 });
 
@@ -89,9 +77,15 @@ router.get('/download/:id', asyncHandler(async (req, res) => {
 // Stream endpoint
 router.get('/stream', validateUrlInput, asyncHandler(async (req, res) => {
   const { url, format } = req.query;
-  const streamInfo = await downloadService.getStreamUrl(url, format);
+  const streamInfo = await downloadService.getStreamUrl(req.validatedUrl, format);
   res.json(streamInfo);
 }));
+
+// Stream download endpoint
+router.get('/stream-download', validateUrlInput, async (req, res) => {
+  const { format } = req.query;
+  await downloadService.streamDownload(req.validatedUrl, format, res);
+});
 
 // Enhanced error handler
 router.use((err, req, res, next) => {
@@ -106,12 +100,5 @@ router.use((err, req, res, next) => {
     console.error('Response already sent, cannot send error:', err.message);
   }
 });
-
-router.get('/stream-download', validateUrlInput, async (req, res) => {
-  const { url, format } = req.query;
-  await downloadService.streamDownload(url, format, res);
-});
-
-
 
 module.exports = router;
