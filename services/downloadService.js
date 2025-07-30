@@ -6,6 +6,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const EventEmitter = require('events');
 const { validateUrl } = require('../utils/validation');
+const { spawn } = require('child_process');
 
 // Get DOWNLOAD_DIR from environment
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, '../downloads');
@@ -331,39 +332,36 @@ const streamVideoDirectly = async (req, res) => {
 // New: Stream video to frontend directly without saving to disk
 const streamDownload = async (url, format, res) => {
   try {
-    // Set response headers for video streaming
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', 'attachment; filename="video.mp4"');
-
-    // Spawn yt-dlp as a child process
-    const { spawn } = require('child_process');
     const args = [
       url,
       '-f', format || 'best',
-      '-o', '-', // 🔥 Output to stdout
-      '--no-part', // avoid .part files
+      '-o', '-', // stream to stdout
+      '--no-part',
       '--no-check-certificate'
     ];
 
-    const ytdlProc = spawn('yt-dlp', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawn(ytdlPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
-    // Pipe stdout (video data) directly to HTTP response
-    ytdlProc.stdout.pipe(res);
+    // Optional: set headers
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', 'attachment; filename="video.mp4"');
 
-    // Optional: capture stderr for logs
-    ytdlProc.stderr.on('data', data => {
-      console.error('yt-dlp:', data.toString());
+    // Pipe video data
+    proc.stdout.pipe(res);
+
+    proc.stderr.on('data', (data) => {
+      console.error('[yt-dlp stderr]', data.toString());
     });
 
-    ytdlProc.on('error', (err) => {
+    proc.on('error', (err) => {
       console.error('Failed to spawn yt-dlp:', err.message);
-      if (!res.headersSent) res.status(500).end('yt-dlp spawn failed');
+      if (!res.headersSent) res.status(500).end('Spawn failed');
     });
 
-    ytdlProc.on('close', (code) => {
+    proc.on('close', (code) => {
       if (code !== 0) {
         console.error(`yt-dlp exited with code ${code}`);
-        if (!res.headersSent) res.status(500).end('yt-dlp failed');
+        if (!res.headersSent) res.status(500).end('yt-dlp error');
       }
     });
 
@@ -374,7 +372,6 @@ const streamDownload = async (url, format, res) => {
     }
   }
 };
-
 
 
 // Export all functions
