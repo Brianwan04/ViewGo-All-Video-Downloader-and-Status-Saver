@@ -333,12 +333,14 @@ const streamVideoDirectly = async (req, res) => {
 const streamDownload = async (url, format, res) => {
   try {
     const args = [
-      url,
-      '-f', format || 'best',
-      '-o', '-', // stream to stdout
-      '--no-part',
-      '--no-check-certificate'
-    ];
+  url,
+  '-f', format || 'best',
+  '-o', '-',
+  '--no-part',
+  '--no-check-certificate',
+  '--cookies', '/full/path/to/cookies.txt'
+];
+
 
     const proc = spawn(ytdlPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
