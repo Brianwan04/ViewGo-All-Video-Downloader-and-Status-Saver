@@ -106,19 +106,10 @@ router.use((err, req, res, next) => {
     console.error('Response already sent, cannot send error:', err.message);
   }
 });
-//this should work
-router.get('/stream-download', async (req, res) => {
+
+// Change the route to use validateUrlInput middleware
+router.get('/stream-download', validateUrlInput, async (req, res) => {
   const { url, format } = req.query;
-
-  if (!url) {
-    return res.status(400).json({ error: 'URL is required' });
-  }
-
-  if (!/^https?:\/\//i.test(url)) {
-  url = 'https://' + url; // Force HTTPS if missing
-}
-
-
   await downloadService.streamDownload(url, format, res);
 });
 
