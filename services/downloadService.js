@@ -47,12 +47,24 @@ const getFormats = async (url) => {
 const getVideoPreview = async (url) => {
   url = validateUrl(url);
   try {
-    const info = await ytdl(url, {
+    const options = {
       dumpSingleJson: true,
       noCheckCertificates: true,
       noWarnings: true,
       skipDownload: true,
-    });
+    };
+
+    // Add special options for problematic platforms
+    if (url.includes('youtube.com') || url.includes('youtu.be')) {
+      options.forceIpv4 = true;
+      options.geoBypass = true;
+    }
+    
+    if (url.includes('instagram.com')) {
+      options.userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
+    }
+
+    const info = await ytdl(url, options);
     
     return {
       id: info.id || url,
@@ -64,6 +76,7 @@ const getVideoPreview = async (url) => {
       view_count: info.view_count,
     };
   } catch (error) {
+    console.error('Preview error:', error);
     throw new Error('Failed to get video preview: ' + error.message);
   }
 };
@@ -332,44 +345,43 @@ const streamVideoDirectly = async (req, res) => {
 // New: Stream video to frontend directly without saving to disk
 const streamDownload = async (url, format, res) => {
   try {
-    url = validateUrl(url); // Add validation
-
-    // Generate a safe filename
+    url = validateUrl(url);
+    
+    // Get video metadata for filename
     const info = await ytdl(url, {
       dumpSingleJson: true,
-      noCheckCertificates: true,
-      skipDownload: true
+      skipDownload: true,
+      noWarnings: true
     });
     
-    const safeTitle = info.title.replace(/[^a-z0-9]/gi, '_').substring(0, 50);
-    const extension = format && format.includes('mp4') ? 'mp4' : 'webm';
-    const filename = `${safeTitle}.${extension}`;
-
+    const safeTitle = info.title.replace(/[^\w\s]/gi, '');
+    const extension = format && format.includes('mp4') ? 'mp4' : 'mp4'; // Default to mp4
+    
     // Set proper headers
     res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-    // Use the correct ytdl path
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
+    
+    // Use absolute path to yt-dlp binary
     const args = [
       url,
-      '-f', format || 'bestvideo+bestaudio/best',
+      '-f', format || 'best',
       '-o', '-',
       '--no-part',
       '--no-check-certificate',
       '--merge-output-format', 'mp4'
     ];
 
-    // Use the existing ytdlPath variable
-    const ytdlProc = spawn(ytdlPath, args, { 
-      stdio: ['ignore', 'pipe', 'pipe'] 
+    // 🔥 CRITICAL FIX: Use the correct binary path
+    const ytdlProc = spawn(ytdlPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'] // Only pipe stdout
     });
 
-    // Pipe output correctly
+    // 🔥 Only pipe stdout to response
     ytdlProc.stdout.pipe(res);
 
     // Handle errors
     ytdlProc.stderr.on('data', data => {
-      console.error('yt-dlp stderr:', data.toString());
+      console.error('[yt-dlp stderr]', data.toString());
     });
 
     ytdlProc.on('error', (err) => {
@@ -377,9 +389,18 @@ const streamDownload = async (url, format, res) => {
       if (!res.headersSent) res.status(500).end('Download failed');
     });
 
+    // Handle process exit
     ytdlProc.on('close', (code) => {
-      if (code !== 0 && !res.headersSent) {
-        res.status(500).end('Download process failed');
+      if (code !== 0) {
+        console.error(`yt-dlp exited with code ${code}`);
+        if (!res.headersSent) res.status(500).end('Download failed');
+      }
+    });
+
+    // Handle client disconnect
+    res.on('close', () => {
+      if (!ytdlProc.killed) {
+        ytdlProc.kill('SIGTERM');
       }
     });
 
