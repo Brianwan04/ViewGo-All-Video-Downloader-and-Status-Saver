@@ -1,6 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { validateSearchInput, validateUrlInput, validateUrlInputGET, validateUrlInputPOST } = require('../utils/validation');
+const { 
+  validateSearchInput, 
+  validateUrlInputGET, 
+  validateUrlInputPOST 
+} = require('../utils/validation');
 const youtubeService = require('../services/youtubeService');
 const downloadService = require('../services/downloadService');
 const path = require('path');
@@ -96,8 +100,8 @@ router.get('/stream-download', validateUrlInputGET, async (req, res) => {
   );
 });
 
-// Download endpoint
-router.post('/download', validateUrlInput, asyncHandler(async (req, res) => {
+// Download endpoint - Updated to use POST validator
+router.post('/download', validateUrlInputPOST, asyncHandler(async (req, res) => {
   const { url, format } = req.body;
   const downloadId = await downloadService.startDownload(req.validatedUrl, format);
   res.json({ id: downloadId });
@@ -122,31 +126,11 @@ router.get('/download/:id', asyncHandler(async (req, res) => {
   res.json(status);
 }));
 
-// Stream endpoint
-router.get('/stream', validateUrlInput, asyncHandler(async (req, res) => {
+// Stream endpoint - Updated to use GET validator
+router.get('/stream', validateUrlInputGET, asyncHandler(async (req, res) => {
   const { url, format } = req.query;
   const streamInfo = await downloadService.getStreamUrl(req.validatedUrl, format);
   res.json(streamInfo);
 }));
-
-// Stream download endpoint
-/*router.get('/stream-download', validateUrlInput, async (req, res) => {
-  const { format } = req.query;
-  await downloadService.streamDownload(req.validatedUrl, format, res);
-});
-
-// Enhanced error handler
-router.use((err, req, res, next) => {
-  console.error('API Error:', err.message);
-  
-  if (!res.headersSent) {
-    res.status(500).json({ 
-      error: err.message || 'Internal server error',
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
-    });
-  } else {
-    console.error('Response already sent, cannot send error:', err.message);
-  }
-});*/
 
 module.exports = router;
