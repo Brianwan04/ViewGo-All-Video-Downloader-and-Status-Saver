@@ -11,6 +11,11 @@ const asyncHandler = (fn) => (req, res, next) => {
     .catch(next);
 };
 
+// Root endpoint
+router.get('/', (req, res) => {
+  res.send('Video Downloader API is running');
+});
+
 // Search endpoint
 router.post('/search', validateSearchInput, async (req, res) => {
   const { query } = req.body;
@@ -24,7 +29,8 @@ router.post('/search', validateSearchInput, async (req, res) => {
   }
 });
 
-router.get('/preview', validateUrlInput, async (req, res) => {
+// GET Preview (for non-Instagram platforms)
+router.get('/preview', validateUrlInputGET, async (req, res) => {
   const { cookies, platform } = req.query;
   try {
     const previewInfo = await downloadService.getVideoPreview({
@@ -38,8 +44,23 @@ router.get('/preview', validateUrlInput, async (req, res) => {
   }
 });
 
-// Formats endpoint
-router.get('/formats', validateUrlInput, async (req, res) => {
+// POST Preview (specifically for Instagram)
+router.post('/preview', validateUrlInputPOST, async (req, res) => {
+  const { cookies, platform } = req.body;
+  try {
+    const previewInfo = await downloadService.getVideoPreview({
+      url: req.validatedUrl,
+      platform: platform || 'default',
+      config: { cookies }
+    });
+    res.json(previewInfo);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET Formats (for non-Instagram platforms)
+router.get('/formats', validateUrlInputGET, async (req, res) => {
   const { cookies, platform } = req.query;
   try {
     const formats = await downloadService.getFormats({
@@ -53,8 +74,23 @@ router.get('/formats', validateUrlInput, async (req, res) => {
   }
 });
 
+// POST Formats (specifically for Instagram)
+router.post('/formats', validateUrlInputPOST, async (req, res) => {
+  const { cookies, platform } = req.body;
+  try {
+    const formats = await downloadService.getFormats({
+      url: req.validatedUrl,
+      platform: platform || 'default',
+      config: { cookies }
+    });
+    res.json({ formats });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Stream-download endpoint
-router.get('/stream-download', validateUrlInput, async (req, res) => {
+router.get('/stream-download', validateUrlInputGET, async (req, res) => {
   const { format, cookies, platform } = req.query;
   await downloadService.streamDownload(
     { url: req.validatedUrl, platform, config: { cookies } },
