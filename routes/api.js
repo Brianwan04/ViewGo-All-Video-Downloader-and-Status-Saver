@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { validateSearchInput, validateUrlInput } = require('../utils/validation');
+const { validateSearchInput, validateUrlInput, validateUrlInputGET, validateUrlInputPOST } = require('../utils/validation');
 const youtubeService = require('../services/youtubeService');
 const downloadService = require('../services/downloadService');
 const path = require('path');
