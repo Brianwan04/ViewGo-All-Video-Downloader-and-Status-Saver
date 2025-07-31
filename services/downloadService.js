@@ -49,33 +49,32 @@ const PLATFORM_CONFIGS = {
   }
 };
 
-// Unified function to build options
-const buildPlatformOptions = (platform) => {
-  return {
-    noCheckCertificates: true,
-    noWarnings: true,
-    ...PLATFORM_CONFIGS[platform],
-    ...PLATFORM_CONFIGS.default // Fallback to defaults
-  };
+// Helper to extract video URL from input
+const getVideoUrl = (input) => {
+  return (typeof input === 'string') ? input : input.url;
 };
 
-// Build ytdl options with platform config
-const buildYtdlOptions = (url, extraOptions = {}) => {
-  const { config } = url;
+// Unified function to build options
+const buildYtdlOptions = (input, extraOptions = {}) => {
+  // Safely extract config and platform
+  const config = (input && typeof input === 'object') ? input.config || {} : {};
+  const platform = (input && typeof input === 'object') ? input.platform || 'default' : 'default';
+  
+  // Build base options with proper merging order
   const baseOptions = {
     noCheckCertificates: true,
     noWarnings: true,
+    ...PLATFORM_CONFIGS.default,
+    ...(PLATFORM_CONFIGS[platform] || {}),
     ...config
   };
 
-  // Add cookies if available
-  if (config.cookies && config.cookies.trim() !== '') {
-    baseOptions.cookies = config.cookies;
+  // Clean empty values
+  if (baseOptions.cookies && baseOptions.cookies.trim() === '') {
+    delete baseOptions.cookies;
   }
-
-  // Add proxy if available
-  if (config.proxy && config.proxy.trim() !== '') {
-    baseOptions.proxy = config.proxy;
+  if (baseOptions.proxy && baseOptions.proxy.trim() === '') {
+    delete baseOptions.proxy;
   }
 
   return { ...baseOptions, ...extraOptions };
@@ -84,12 +83,13 @@ const buildYtdlOptions = (url, extraOptions = {}) => {
 // Get available formats
 const getFormats = async (url) => {
   try {
+    const videoUrl = getVideoUrl(url);
     const options = buildYtdlOptions(url, {
       dumpSingleJson: true,
       preferFreeFormats: true
     });
 
-    const info = await ytdl(url, options);
+    const info = await ytdl(videoUrl, options);
 
     return info.formats
       .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
@@ -109,19 +109,19 @@ const getFormats = async (url) => {
 const getVideoPreview = async (url) => {
   const maxRetries = 3;
   let retries = 0;
+  const videoUrl = getVideoUrl(url);
   
   while (retries <= maxRetries) {
     try {
-      const options = {
-      dumpSingleJson: true,
-      skipDownload: true,
-      ...buildPlatformOptions(url.platform) 
-    };
+      const options = buildYtdlOptions(url, {
+        dumpSingleJson: true,
+        skipDownload: true
+      });
 
-      const info = await ytdl(url, options);
+      const info = await ytdl(videoUrl, options);
       
       return {
-        id: info.id || url,
+        id: info.id || videoUrl,
         title: info.title,
         thumbnail: info.thumbnail,
         duration: info.duration,
@@ -131,13 +131,10 @@ const getVideoPreview = async (url) => {
       };
     } catch (error) {
       retries++;
-      
       if (retries > maxRetries) {
         console.error('Preview error:', error);
         throw new Error('Failed to get video preview: ' + error.message);
       }
-      
-      // Add delay before retrying
       await new Promise(resolve => setTimeout(resolve, 1000 * retries));
     }
   }
@@ -145,21 +142,22 @@ const getVideoPreview = async (url) => {
 
 // Get stream URL
 const getStreamUrl = async (url, format) => {
-  const options = {
+  const videoUrl = getVideoUrl(url);
+  const options = buildYtdlOptions(url, {
     format: format || 'best',
-    output: '-', // Stream to stdout
-    mergeOutputFormat: 'mp4',
-    ...buildPlatformOptions(url.platform)
-  };
+    dumpSingleJson: true
+  });
 
-  const info = await ytdl(url, options);
+  const info = await ytdl(videoUrl, options);
 
-  // 1) Prefer HLS (manifest) formats
-  const hlsFormat = info.formats.find(f =>
-    f.ext === 'm3u8_native' || f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))
+  // 1) Prefer HLS formats
+  const hlsFormat = info.formats.find(f => 
+    f.ext === 'm3u8_native' || 
+    f.protocol === 'm3u8_native' || 
+    (f.url && f.url.includes('.m3u8'))
   );
   
-  if (hlsFormat && hlsFormat.url) {
+  if (hlsFormat?.url) {
     return {
       url: hlsFormat.url,
       format: hlsFormat.format_id,
@@ -168,10 +166,10 @@ const getStreamUrl = async (url, format) => {
     };
   }
 
-  // 2) Use requested format if available
+  // 2) Use requested format
   if (format) {
     const chosen = info.formats.find(f => f.format_id === format);
-    if (chosen && chosen.url) {
+    if (chosen?.url) {
       return {
         url: chosen.url,
         format: chosen.format_id,
@@ -186,7 +184,7 @@ const getStreamUrl = async (url, format) => {
     .filter(f => f.protocol === 'https' && f.vcodec !== 'none' && f.acodec !== 'none')
     .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
 
-  if (progressive && progressive.url) {
+  if (progressive?.url) {
     return {
       url: progressive.url,
       format: progressive.format_id,
@@ -202,6 +200,7 @@ const getStreamUrl = async (url, format) => {
 const startDownload = async (url, format) => {
   const id = uuidv4();
   const output = path.join(DOWNLOAD_DIR, `${id}.%(ext)s`);
+  const videoUrl = getVideoUrl(url);
 
   // Create progress emitter
   const progressEmitter = new DownloadProgressEmitter();
@@ -210,7 +209,7 @@ const startDownload = async (url, format) => {
   // Store initial state
   downloads.set(id, {
     id,
-    url: url,
+    url: videoUrl,
     format,
     status: 'downloading',
     progress: 0,
@@ -223,7 +222,7 @@ const startDownload = async (url, format) => {
     try {
       const options = buildYtdlOptions(url);
       const args = [
-        urlInfo.url,
+        videoUrl,
         '-o', output,
       ];
       
@@ -254,8 +253,10 @@ const startDownload = async (url, format) => {
         if (match) {
           const progress = parseFloat(match[1]);
           const download = downloads.get(id);
-          download.progress = progress;
-          progressEmitter.emit('progress', progress);
+          if (download) {
+            download.progress = progress;
+            progressEmitter.emit('progress', progress);
+          }
         }
       });
 
@@ -268,18 +269,22 @@ const startDownload = async (url, format) => {
       
       if (outputFile) {
         const filePath = path.join(DOWNLOAD_DIR, outputFile);
-        downloads.get(id).status = 'completed';
-        downloads.get(id).filePath = filePath;
+        const download = downloads.get(id);
+        if (download) {
+          download.status = 'completed';
+          download.filePath = filePath;
+        }
         progressEmitter.emit('completed', filePath);
-        
-        // Schedule file deletion
         scheduleFileDeletion(filePath);
       } else {
         throw new Error('Output file not found');
       }
     } catch (error) {
-      downloads.get(id).status = 'error';
-      downloads.get(id).error = error.message;
+      const download = downloads.get(id);
+      if (download) {
+        download.status = 'error';
+        download.error = error.message;
+      }
       console.error('[Download Error]', error);
       progressEmitter.emit('error', error.message || 'Unknown error');
     }
@@ -295,7 +300,6 @@ const setupProgressStream = (id, res) => {
     return res.status(404).end();
   }
 
-  // SAFETY: Check if headers are already sent
   if (res.headersSent) {
     console.error('Headers already sent for', id);
     return;
@@ -305,22 +309,18 @@ const setupProgressStream = (id, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   
-  // Monkey-patch res.flush if missing
   if (typeof res.flush !== 'function') {
-    res.flush = () => {}; // No-op function
+    res.flush = () => {};
   }
 
   res.flushHeaders();
 
-  // SAFE event sender
   const sendEvent = (event, data) => {
     try {
-      // Critical: Check if response is still writable
       if (res.writableEnded || !res.writable) {
         progressEmitter.removeAllListeners();
         return;
       }
-      
       res.write(`event: ${event}\n`);
       res.write(`data: ${JSON.stringify(data)}\n\n`);
       res.flush();
@@ -330,28 +330,24 @@ const setupProgressStream = (id, res) => {
     }
   };
 
-  // Send initial progress
   const download = downloads.get(id);
   if (download) {
     sendEvent('progress', { progress: download.progress });
   }
 
-  // Listen for updates
   const onProgress = (progress) => sendEvent('progress', { progress });
   const onCompleted = (filePath) => {
     const filename = path.basename(filePath);
     sendEvent('completed', { downloadUrl: `/downloads/${filename}` });
   };
   const onError = (error) => {
-    const safeError = typeof error === 'string' ? error : (error?.message || 'Unknown error');
-    sendEvent('error', { error: safeError });
+    sendEvent('error', { error: typeof error === 'string' ? error : (error?.message || 'Unknown error') });
   };
   
   progressEmitter.on('progress', onProgress);
   progressEmitter.on('completed', onCompleted);
   progressEmitter.on('error', onError);
 
-  // Cleanup on disconnect
   res.on('close', () => {
     progressEmitter.off('progress', onProgress);
     progressEmitter.off('completed', onCompleted);
@@ -371,66 +367,64 @@ const getDownloadStatus = (id) => {
 const scheduleFileDeletion = (filePath) => {
   const retentionMinutes = parseInt(process.env.FILE_RETENTION_MINUTES || '30');
   setTimeout(() => {
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-      console.log(`Deleted file: ${filePath}`);
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        console.log(`Deleted file: ${filePath}`);
+      }
+    } catch (err) {
+      console.error('File deletion error:', err.message);
     }
   }, retentionMinutes * 60 * 1000);
 };
 
 // Stream video to frontend directly
 const streamDownload = async (url, format, res) => {
+  const videoUrl = getVideoUrl(url);
+  
   try {
-    // Get video metadata
-    const options = {
-    format: format || 'best',
-    output: '-', // Stream to stdout
-    mergeOutputFormat: 'mp4',
-    ...buildPlatformOptions(url.platform)
-  };
+    const options = buildYtdlOptions(url, {
+      dumpSingleJson: true,
+      format: format || 'best'
+    });
     
-    const info = await ytdl(url, options);
-    
-    const safeTitle = info.title.replace(/[^\w\s]/gi, '');
+    const info = await ytdl(videoUrl, options);
+    const safeTitle = (info.title || 'video').replace(/[^\w\s]/gi, '');
     const extension = format && format.includes('mp4') ? 'mp4' : 'mp4';
     
-    // Set proper headers
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
 
-    // Build arguments
     const args = [
-      url,
+      videoUrl,
       '-f', format || 'best',
       '-o', '-',
       '--no-part',
-      '--no-check-certificate',
+      '--no-check-certificates',
       '--merge-output-format', 'mp4'
     ];
 
     // Add platform-specific options
-    if (url.config.cookies) {
-      args.push('--cookies', url.config.cookies);
+    const config = buildYtdlOptions(url);
+    if (config.cookies) {
+      args.push('--cookies', config.cookies);
     }
-    if (url.config.proxy) {
-      args.push('--proxy', url.config.proxy);
+    if (config.proxy) {
+      args.push('--proxy', config.proxy);
     }
-    if (url.config.userAgent) {
-      args.push('--user-agent', url.config.userAgent);
+    if (config.userAgent) {
+      args.push('--user-agent', config.userAgent);
     }
-    if (url.config.referer) {
-      args.push('--referer', url.config.referer);
+    if (config.referer) {
+      args.push('--referer', config.referer);
     }
 
-    // Spawn yt-dlp process
     const ytdlProc = spawn(ytdlPath, args, {
       stdio: ['ignore', 'pipe', 'pipe']
     });
 
-    // Pipe stdout to response
     ytdlProc.stdout.pipe(res);
 
-    // Handle errors
     ytdlProc.stderr.on('data', data => {
       console.error('[yt-dlp stderr]', data.toString());
     });
@@ -441,20 +435,15 @@ const streamDownload = async (url, format, res) => {
     });
 
     ytdlProc.on('close', (code) => {
-      if (code !== 0) {
-        console.error(`yt-dlp exited with code ${code}`);
-        if (!res.headersSent) res.status(500).end('Download failed');
+      if (code !== 0 && !res.headersSent) {
+        res.status(500).end('Download failed');
       }
     });
 
-    // Handle client disconnect
     res.on('close', () => {
-      if (!ytdlProc.killed) {
-        ytdlProc.kill('SIGTERM');
-      }
+      if (!ytdlProc.killed) ytdlProc.kill('SIGTERM');
     });
 
-    // Set timeout to prevent hanging
     res.setTimeout(300000, () => {
       if (!res.headersSent) {
         res.status(504).end('Download timeout');
