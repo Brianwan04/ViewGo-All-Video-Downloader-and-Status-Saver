@@ -11,28 +11,25 @@ const asyncHandler = (fn) => (req, res, next) => {
     .catch(next);
 };
 
-// Root endpoint
+/ Root endpoint
 router.get('/', (req, res) => {
   res.send('Video Downloader API is running');
 });
 
 // Search endpoint
 router.post('/search', validateSearchInput, async (req, res) => {
-  const { query } = req.body;
   try {
     const results = await youtubeService.search(req.validatedQuery);
     res.json({ results });
   } catch (error) {
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
+    res.status(500).json({ error: error.message });
   }
 });
 
 // GET Preview (for non-Instagram platforms)
 router.get('/preview', validateUrlInputGET, async (req, res) => {
-  const { cookies, platform } = req.query;
   try {
+    const { cookies, platform } = req.query;
     const previewInfo = await downloadService.getVideoPreview({
       url: req.validatedUrl,
       platform: platform || 'default',
@@ -46,8 +43,8 @@ router.get('/preview', validateUrlInputGET, async (req, res) => {
 
 // POST Preview (specifically for Instagram)
 router.post('/preview', validateUrlInputPOST, async (req, res) => {
-  const { cookies, platform } = req.body;
   try {
+    const { cookies, platform } = req.body;
     const previewInfo = await downloadService.getVideoPreview({
       url: req.validatedUrl,
       platform: platform || 'default',
@@ -61,8 +58,8 @@ router.post('/preview', validateUrlInputPOST, async (req, res) => {
 
 // GET Formats (for non-Instagram platforms)
 router.get('/formats', validateUrlInputGET, async (req, res) => {
-  const { cookies, platform } = req.query;
   try {
+    const { cookies, platform } = req.query;
     const formats = await downloadService.getFormats({
       url: req.validatedUrl,
       platform: platform || 'default',
@@ -76,8 +73,8 @@ router.get('/formats', validateUrlInputGET, async (req, res) => {
 
 // POST Formats (specifically for Instagram)
 router.post('/formats', validateUrlInputPOST, async (req, res) => {
-  const { cookies, platform } = req.body;
   try {
+    const { cookies, platform } = req.body;
     const formats = await downloadService.getFormats({
       url: req.validatedUrl,
       platform: platform || 'default',
