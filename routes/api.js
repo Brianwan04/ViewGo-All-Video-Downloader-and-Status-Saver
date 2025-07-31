@@ -24,7 +24,7 @@ router.post('/search', validateSearchInput, async (req, res) => {
   }
 });
 
-router.post('/preview', validateUrlInput, async (req, res) => {
+router.get('/preview', validateUrlInput, async (req, res) => {
   const { cookies, platform } = req.body;
   try {
     const previewInfo = await downloadService.getVideoPreview({
@@ -39,7 +39,7 @@ router.post('/preview', validateUrlInput, async (req, res) => {
 });
 
 // Formats endpoint
-router.post('/formats', validateUrlInput, async (req, res) => {
+router.get('/formats', validateUrlInput, async (req, res) => {
   const { cookies, platform } = req.body;
   try {
     const formats = await downloadService.getFormats({
@@ -54,7 +54,7 @@ router.post('/formats', validateUrlInput, async (req, res) => {
 });
 
 // Stream-download endpoint
-router.post('/stream-download', validateUrlInput, async (req, res) => {
+router.get('/stream-download', validateUrlInput, async (req, res) => {
   const { format, cookies, platform } = req.body;
   await downloadService.streamDownload(
     { url: req.validatedUrl, platform, config: { cookies } },
