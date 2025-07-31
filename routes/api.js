@@ -11,7 +11,7 @@ const asyncHandler = (fn) => (req, res, next) => {
     .catch(next);
 };
 
-/ Root endpoint
+// Root endpoint
 router.get('/', (req, res) => {
   res.send('Video Downloader API is running');
 });
