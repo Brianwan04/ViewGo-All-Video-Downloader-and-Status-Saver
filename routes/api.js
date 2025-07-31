@@ -24,28 +24,43 @@ router.post('/search', validateSearchInput, async (req, res) => {
   }
 });
 
-// Get formats endpoint
-router.get('/formats', validateUrlInput, async (req, res) => {
+router.post('/preview', validateUrlInput, async (req, res) => {
+  const { cookies, platform } = req.body;
   try {
-    const formats = await downloadService.getFormats(req.validatedUrl);
-    res.json({ formats });
+    const previewInfo = await downloadService.getVideoPreview({
+      url: req.validatedUrl,
+      platform: platform || 'default',
+      config: { cookies }
+    });
+    res.json(previewInfo);
   } catch (error) {
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Preview endpoint
-router.get('/preview', validateUrlInput, async (req, res) => {
+// Formats endpoint
+router.post('/formats', validateUrlInput, async (req, res) => {
+  const { cookies, platform } = req.body;
   try {
-    const previewInfo = await downloadService.getVideoPreview(req.validatedUrl);
-    res.json(previewInfo);
+    const formats = await downloadService.getFormats({
+      url: req.validatedUrl,
+      platform: platform || 'default',
+      config: { cookies }
+    });
+    res.json({ formats });
   } catch (error) {
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
+    res.status(500).json({ error: error.message });
   }
+});
+
+// Stream-download endpoint
+router.post('/stream-download', validateUrlInput, async (req, res) => {
+  const { format, cookies, platform } = req.body;
+  await downloadService.streamDownload(
+    { url: req.validatedUrl, platform, config: { cookies } },
+    format,
+    res
+  );
 });
 
 // Download endpoint
@@ -82,7 +97,7 @@ router.get('/stream', validateUrlInput, asyncHandler(async (req, res) => {
 }));
 
 // Stream download endpoint
-router.get('/stream-download', validateUrlInput, async (req, res) => {
+/*router.get('/stream-download', validateUrlInput, async (req, res) => {
   const { format } = req.query;
   await downloadService.streamDownload(req.validatedUrl, format, res);
 });
@@ -99,6 +114,6 @@ router.use((err, req, res, next) => {
   } else {
     console.error('Response already sent, cannot send error:', err.message);
   }
-});
+});*/
 
 module.exports = router;
