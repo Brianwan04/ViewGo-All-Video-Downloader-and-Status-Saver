@@ -70,9 +70,11 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   };
 
   // Clean empty values
-  if (baseOptions.cookies && baseOptions.cookies.trim() === '') {
-    delete baseOptions.cookies;
-  }
+  if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
+  // Use HTTP header instead of cookie file
+  baseOptions.addHeader = [`cookie: ${baseOptions.cookies.trim()}`];
+  delete baseOptions.cookies;
+}
   if (baseOptions.proxy && baseOptions.proxy.trim() === '') {
     delete baseOptions.proxy;
   }
@@ -243,6 +245,10 @@ const startDownload = async (url, format) => {
       if (options.referer) {
         args.push('--referer', options.referer);
       }
+      if (options.addHeader) {
+  options.addHeader.forEach(hdr => args.push('--add-header', hdr));
+}
+if (options.userAgent) args.push('--user-agent', options.userAgent);
 
       const ytdlProcess = ytdl.exec(args);
 
@@ -403,6 +409,11 @@ const streamDownload = async (url, format, res) => {
       '--no-check-certificates',
       '--merge-output-format', 'mp4'
     ];
+
+    if (options.addHeader) {
+  options.addHeader.forEach(hdr => args.push('--add-header', hdr));
+}
+if (options.userAgent) args.push('--user-agent', options.userAgent);
 
     // Add platform-specific options
     const config = buildYtdlOptions(url);
