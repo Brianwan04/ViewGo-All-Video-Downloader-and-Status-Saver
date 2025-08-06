@@ -32,8 +32,7 @@ const PLATFORM_CONFIGS = {
     userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
     referer: "https://www.instagram.com/",
     forceIpv4: true,
-    proxy: process.env.INSTAGRAM_PROXY || "",
-    cookies: process.env.INSTAGRAM_COOKIES || ""
+    proxy: process.env.INSTAGRAM_PROXY || ""
   },
   facebook: {
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -72,10 +71,10 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
 
   // Clean empty values
   if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
-    // Use HTTP header instead of cookie file
-    baseOptions.addHeader = [`cookie: ${baseOptions.cookies.trim()}`];
-    delete baseOptions.cookies;
-  }
+  // Use HTTP header instead of cookie file
+  baseOptions.addHeader = [cookie: ${baseOptions.cookies.trim()}];
+  delete baseOptions.cookies;
+}
   if (baseOptions.proxy && baseOptions.proxy.trim() === '') {
     delete baseOptions.proxy;
   }
@@ -99,7 +98,7 @@ const getFormats = async (url) => {
       .map(f => ({
         format_id: f.format_id,
         ext: f.ext,
-        resolution: f.resolution || `${f.height}p` || 'unknown',
+        resolution: f.resolution || ${f.height}p || 'unknown',
         format_note: f.format_note,
         filesize: f.filesize,
       }));
@@ -202,7 +201,7 @@ const getStreamUrl = async (url, format) => {
 // Start a download
 const startDownload = async (url, format) => {
   const id = uuidv4();
-  const output = path.join(DOWNLOAD_DIR, `${id}.%(ext)s`);
+  const output = path.join(DOWNLOAD_DIR, ${id}.%(ext)s);
   const videoUrl = getVideoUrl(url);
 
   // Create progress emitter
@@ -328,8 +327,8 @@ const setupProgressStream = (id, res) => {
         progressEmitter.removeAllListeners();
         return;
       }
-      res.write(`event: ${event}\n`);
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      res.write(event: ${event}\n);
+      res.write(data: ${JSON.stringify(data)}\n\n);
       res.flush();
     } catch (err) {
       console.error('SSE write error:', err.message);
@@ -345,7 +344,7 @@ const setupProgressStream = (id, res) => {
   const onProgress = (progress) => sendEvent('progress', { progress });
   const onCompleted = (filePath) => {
     const filename = path.basename(filePath);
-    sendEvent('completed', { downloadUrl: `/downloads/${filename}` });
+    sendEvent('completed', { downloadUrl: /downloads/${filename} });
   };
   const onError = (error) => {
     sendEvent('error', { error: typeof error === 'string' ? error : (error?.message || 'Unknown error') });
@@ -377,7 +376,7 @@ const scheduleFileDeletion = (filePath) => {
     try {
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
-        console.log(`Deleted file: ${filePath}`);
+        console.log(Deleted file: ${filePath});
       }
     } catch (err) {
       console.error('File deletion error:', err.message);
@@ -400,7 +399,7 @@ const streamDownload = async (url, format, res) => {
     const extension = format && format.includes('mp4') ? 'mp4' : 'mp4';
     
     res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
+    res.setHeader('Content-Disposition', attachment; filename="${safeTitle}.${extension}");
 
     const args = [
       videoUrl,
@@ -419,7 +418,7 @@ if (options.userAgent) args.push('--user-agent', options.userAgent);
     // Add platform-specific options
     const config = buildYtdlOptions(url);
     if (config.cookies) {
-      args.push('--add-header', `cookie: ${config.cookies}`);
+      args.push('--cookies', config.cookies);
     }
     if (config.proxy) {
       args.push('--proxy', config.proxy);
@@ -464,18 +463,9 @@ if (options.userAgent) args.push('--user-agent', options.userAgent);
     });
 
   } catch (err) {
-    // Handle Instagram auth errors specifically
-    if (err.message.includes('login required') || 
-        err.message.includes('rate-limit reached')) {
-      res.status(401).json({ 
-        error: 'Instagram authentication required',
-        platform: 'instagram'
-      });
-    } else {
-      console.error('Streaming error:', err);
-      if (!res.headersSent) {
-        res.status(500).json({ error: err.message || 'Stream failed' });
-      }
+    console.error('Streaming error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message || 'Stream failed' });
     }
   }
 };
