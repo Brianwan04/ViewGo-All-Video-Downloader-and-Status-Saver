@@ -53,7 +53,7 @@ router.post('/search', validateSearchInput, async (req, res) => {
 });
 
 // GET Preview (for non-Instagram platforms)
-router.get('/preview', validateUrlInputGET, async (req, res) => {
+/*router.get('/preview', validateUrlInputGET, async (req, res) => {
   try {
     const { cookies, platform } = req.query;
     const previewInfo = await downloadService.getVideoPreview({
@@ -111,7 +111,26 @@ router.post('/formats', validateUrlInputPOST, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+*/
+app.post('/formats', async (req, res) => {
+  const { url, platform, cookies } = req.body;
+  try {
+    const formats = await getFormats({ url, platform, cookies });
+    res.json({ formats });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
+/*app.post('/preview', async (req, res) => {
+  const { url, platform, cookies } = req.body;
+  try {
+    const preview = await getVideoPreview({ url, platform, cookies });
+    res.json(preview);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});*/
 // Stream-download endpoint
 router.get('/stream-download', validateUrlInputGET, async (req, res) => {
   const { format, cookies, platform } = req.query;
@@ -121,6 +140,27 @@ router.get('/stream-download', validateUrlInputGET, async (req, res) => {
     res
   );
 });
+
+router.post('/stream-download', async (req, res) => {
+  const { url, format, platform, cookies } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'Missing url' });
+  }
+
+  try {
+    // Delegate to your service, which should call:
+    // buildYtdlOptions({ url, platform, cookies }, { format, dumpSingleJson: true })
+    await streamDownload({ url, platform, cookies }, format, res);
+    // streamDownload handles piping and headers itself
+  } catch (err) {
+    console.error('Streaming error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: err.message || 'Stream failed' });
+    }
+  }
+});
+
 
 // Download endpoint - Updated to use POST validator
 router.post('/download', validateUrlInputPOST, asyncHandler(async (req, res) => {
