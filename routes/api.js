@@ -53,7 +53,7 @@ router.post('/search', validateSearchInput, async (req, res) => {
 });
 
 // GET Preview (for non-Instagram platforms)
-/*router.get('/preview', validateUrlInputGET, async (req, res) => {
+router.get('/preview', validateUrlInputGET, async (req, res) => {
   try {
     const { cookies, platform } = req.query;
     const previewInfo = await downloadService.getVideoPreview({
@@ -111,26 +111,8 @@ router.post('/formats', validateUrlInputPOST, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-*/
-router.post('/formats', async (req, res) => {
-  const { url, platform, cookies } = req.body;
-  try {
-    const formats = await getFormats({ url, platform, cookies });
-    res.json({ formats });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
-router.post('/preview', async (req, res) => {
-  const { url, platform, cookies } = req.body;
-  try {
-    const preview = await getVideoPreview({ url, platform, cookies });
-    res.json(preview);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+
 // Stream-download endpoint
 router.get('/stream-download', validateUrlInputGET, async (req, res) => {
   const { format, cookies, platform } = req.query;
@@ -141,27 +123,56 @@ router.get('/stream-download', validateUrlInputGET, async (req, res) => {
   );
 });
 
-router.post('/stream-download', async (req, res) => {
-  const { url, format, platform, cookies } = req.body;
+router.post('/stream-download', (req, res) => {
+  const { url, format, cookies } = req.body;
 
-  if (!url) {
-    return res.status(400).json({ error: 'Missing url' });
+  if (!url || !format) {
+    return res.status(400).json({ error: 'Missing url or format' });
   }
 
-  try {
-    // Delegate to your service, which should call:
-    // buildYtdlOptions({ url, platform, cookies }, { format, dumpSingleJson: true })
-    await streamDownload({ url, platform, cookies }, format, res);
-    // streamDownload handles piping and headers itself
-  } catch (err) {
-    console.error('Streaming error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message || 'Stream failed' });
+  // Write cookies to a temporary file if provided
+  const fs = require('fs');
+  const path = require('path');
+  const cookiePath = path.join(__dirname, '../temp_cookies.txt');
+
+  if (cookies) {
+    fs.writeFileSync(cookiePath, cookies);
+  }
+
+  // Prepare yt-dlp args
+  const args = [
+    url,
+    '-f', format,
+    '-o', '-', // stream to stdout
+    '--no-playlist'
+  ];
+
+  if (cookies) {
+    args.push('--cookies', cookiePath);
+  }
+
+  const ytdlp = spawn('yt-dlp', args);
+
+  // Set headers
+  res.setHeader('Content-Disposition', 'attachment; filename="video.mp4"');
+  res.setHeader('Content-Type', 'video/mp4');
+
+  ytdlp.stdout.pipe(res);
+
+  ytdlp.stderr.on('data', (data) => {
+    console.error('yt-dlp error:', data.toString());
+  });
+
+  ytdlp.on('close', (code) => {
+    if (cookies && fs.existsSync(cookiePath)) {
+      fs.unlinkSync(cookiePath); // delete temp cookie file
     }
-  }
+
+    if (code !== 0) {
+      res.status(500).end('Download failed');
+    }
+  });
 });
-
-
 // Download endpoint - Updated to use POST validator
 router.post('/download', validateUrlInputPOST, asyncHandler(async (req, res) => {
   const { url, format } = req.body;
