@@ -130,7 +130,7 @@ router.post('/preview', async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});*/
+});
 // Stream-download endpoint
 router.get('/stream-download', validateUrlInputGET, async (req, res) => {
   const { format, cookies, platform } = req.query;
