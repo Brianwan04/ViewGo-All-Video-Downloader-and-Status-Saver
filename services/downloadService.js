@@ -32,7 +32,8 @@ const PLATFORM_CONFIGS = {
     userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
     referer: "https://www.instagram.com/",
     forceIpv4: true,
-    proxy: process.env.INSTAGRAM_PROXY || ""
+    proxy: process.env.INSTAGRAM_PROXY || "",
+    cookies: process.env.INSTAGRAM_COOKIES || ""
   },
   facebook: {
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -71,10 +72,10 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
 
   // Clean empty values
   if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
-  // Use HTTP header instead of cookie file
-  baseOptions.addHeader = [`cookie: ${baseOptions.cookies.trim()}`];
-  delete baseOptions.cookies;
-}
+    // Use HTTP header instead of cookie file
+    baseOptions.addHeader = [`cookie: ${baseOptions.cookies.trim()}`];
+    delete baseOptions.cookies;
+  }
   if (baseOptions.proxy && baseOptions.proxy.trim() === '') {
     delete baseOptions.proxy;
   }
@@ -418,7 +419,7 @@ if (options.userAgent) args.push('--user-agent', options.userAgent);
     // Add platform-specific options
     const config = buildYtdlOptions(url);
     if (config.cookies) {
-      args.push('--cookies', config.cookies);
+      args.push('--add-header', `cookie: ${config.cookies}`);
     }
     if (config.proxy) {
       args.push('--proxy', config.proxy);
@@ -463,9 +464,18 @@ if (options.userAgent) args.push('--user-agent', options.userAgent);
     });
 
   } catch (err) {
-    console.error('Streaming error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message || 'Stream failed' });
+    // Handle Instagram auth errors specifically
+    if (err.message.includes('login required') || 
+        err.message.includes('rate-limit reached')) {
+      res.status(401).json({ 
+        error: 'Instagram authentication required',
+        platform: 'instagram'
+      });
+    } else {
+      console.error('Streaming error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || 'Stream failed' });
+      }
     }
   }
 };
