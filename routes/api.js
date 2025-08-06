@@ -20,6 +20,28 @@ router.get('/', (req, res) => {
   res.send('Video Downloader API is running');
 });
 
+router.post('/auth/instagram', async (req, res) => {
+  const { url, cookies } = req.body;
+  if (!url || !cookies) {
+    return res.status(400).json({ success: false, error: 'URL and cookies are required' });
+  }
+
+  try {
+    // Save cookies to a temporary file
+    const fs = require('fs').promises;
+    const cookieFilePath = `/tmp/instagram_cookies_${Date.now()}.txt`;
+    await fs.writeFile(cookieFilePath, cookies);
+
+    // Fetch preview with cookies
+    const previewData = await getVideoPreview(url, cookieFilePath);
+    // Clean up cookie file
+    await fs.unlink(cookieFilePath);
+    res.json({ success: true, data: previewData });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Search endpoint
 router.post('/search', validateSearchInput, async (req, res) => {
   try {
