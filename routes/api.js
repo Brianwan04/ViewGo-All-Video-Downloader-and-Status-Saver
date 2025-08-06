@@ -112,7 +112,7 @@ router.post('/formats', validateUrlInputPOST, async (req, res) => {
   }
 });
 */
-app.post('/formats', async (req, res) => {
+router.post('/formats', async (req, res) => {
   const { url, platform, cookies } = req.body;
   try {
     const formats = await getFormats({ url, platform, cookies });
@@ -122,7 +122,7 @@ app.post('/formats', async (req, res) => {
   }
 });
 
-/*app.post('/preview', async (req, res) => {
+router.post('/preview', async (req, res) => {
   const { url, platform, cookies } = req.body;
   try {
     const preview = await getVideoPreview({ url, platform, cookies });
