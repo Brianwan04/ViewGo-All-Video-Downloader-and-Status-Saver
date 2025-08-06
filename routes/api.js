@@ -113,7 +113,7 @@ router.post('/formats', validateUrlInputPOST, async (req, res) => {
 });
 
 // Stream-download endpoint
-/*router.get('/stream-download', validateUrlInputGET, async (req, res) => {
+router.get('/stream-download', validateUrlInputGET, async (req, res) => {
   const { format, cookies, platform } = req.query;
   await downloadService.streamDownload(
     { url: req.validatedUrl, platform, config: { cookies } },
@@ -121,33 +121,7 @@ router.post('/formats', validateUrlInputPOST, async (req, res) => {
     res
   );
 });
-*/
-router.get('/stream-download', async (req, res) => {
-  const { url, format, cookies } = req.query;
-  if (!url || !format) {
-    return res.status(400).send('URL and format are required');
-  }
 
-  let cookieFilePath = null;
-  if (cookies) {
-    const fs = require('fs').promises;
-    cookieFilePath = `/tmp/instagram_cookies_${Date.now()}.txt`;
-    await fs.writeFile(cookieFilePath, decodeURIComponent(cookies));
-  }
-
-  try {
-    const stream = await streamDownload(decodeURIComponent(url), format, cookieFilePath);
-    res.setHeader('Content-Type', 'video/mp4');
-    stream.pipe(res);
-  } catch (error) {
-    res.status(500).send(error.message);
-  } finally {
-    if (cookieFilePath) {
-      const fs = require('fs').promises;
-      await fs.unlink(cookieFilePath).catch(() => {});
-    }
-  }
-});
 // Download endpoint - Updated to use POST validator
 router.post('/download', validateUrlInputPOST, asyncHandler(async (req, res) => {
   const { url, format } = req.body;
