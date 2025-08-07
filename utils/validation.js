@@ -53,7 +53,8 @@ const validateUrl = (inputUrl) => {
     'threads.net',
     'likee.video',
     'triller.co',
-    '9gag.com'
+    '9gag.com',
+    'dai.ly.com'
   ];
 
   if (!supportedPlatforms.some(domain => url.includes(domain))) {
