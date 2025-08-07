@@ -403,9 +403,11 @@ const streamDownload = async (url, format, res) => {
       res.status(401).json({ 
         error: 'Instagram authentication required'
       });
-    console.error('Streaming error:', err);
-    if (!res.headersSent) {
-      res.status(500).json({ error: err.message || 'Stream failed' });
+    } else {
+      console.error('Streaming error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message || 'Stream failed' });
+      }
     }
   }
 };
