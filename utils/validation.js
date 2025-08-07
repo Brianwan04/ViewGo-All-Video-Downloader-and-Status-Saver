@@ -54,7 +54,8 @@ const validateUrl = (inputUrl) => {
     'likee.video',
     'triller.co',
     '9gag.com',
-    'dai.ly.com'
+    'dai.ly.com',
+    'dai.ly'
   ];
 
   if (!supportedPlatforms.some(domain => url.includes(domain))) {
