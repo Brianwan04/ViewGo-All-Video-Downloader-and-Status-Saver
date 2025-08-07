@@ -61,6 +61,7 @@ const getVideoUrl = (input) => {
 const buildYtdlOptions = (input, extraOptions = {}) => {
   const config = typeof input === 'object' ? input.config || {} : {};
   const platform = typeof input === 'object' ? input.platform || 'default' : 'default';
+  const videoUrl = getVideoUrl(input);
 
   const baseOptions = {
     noCheckCertificates: true,
@@ -70,9 +71,14 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
     ...config,
   };
 
-  if (isInstagramUrl(videoUrl) && process.env.INSTAGRAM_COOKIES) {
-    baseOptions.addHeader = baseOptions.addHeader || [];
-    baseOptions.addHeader.push(`cookie: ${process.env.INSTAGRAM_COOKIES}`);
+  if (isInstagramUrl(videoUrl) {
+    if (process.env.INSTAGRAM_COOKIES) {
+      baseOptions.addHeader = baseOptions.addHeader || [];
+      baseOptions.addHeader.push(`cookie: ${process.env.INSTAGRAM_COOKIES}`);
+    }
+    if (process.env.INSTAGRAM_PROXY) {
+      baseOptions.proxy = process.env.INSTAGRAM_PROXY;
+    }
   }
 
   if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
