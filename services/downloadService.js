@@ -71,7 +71,7 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
     ...config,
   };
 
-  if (isInstagramUrl(videoUrl) {
+  if (isInstagramUrl(videoUrl)) {
     if (process.env.INSTAGRAM_COOKIES) {
       baseOptions.addHeader = baseOptions.addHeader || [];
       baseOptions.addHeader.push(`cookie: ${process.env.INSTAGRAM_COOKIES}`);
