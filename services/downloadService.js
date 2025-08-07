@@ -50,6 +50,10 @@ const PLATFORM_CONFIGS = {
   },
 };
 
+const isInstagramUrl = (url) => {
+  return /instagram\.com/i.test(url);
+};
+
 const getVideoUrl = (input) => {
   return typeof input === 'string' ? input : input.url;
 };
@@ -65,6 +69,11 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
     ...(PLATFORM_CONFIGS[platform] || {}),
     ...config,
   };
+
+  if (isInstagramUrl(videoUrl) && process.env.INSTAGRAM_COOKIES) {
+    baseOptions.addHeader = baseOptions.addHeader || [];
+    baseOptions.addHeader.push(`cookie: ${process.env.INSTAGRAM_COOKIES}`);
+  }
 
   if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
     baseOptions.addHeader = [`cookie: ${baseOptions.cookies.trim()}`];
@@ -354,6 +363,10 @@ const streamDownload = async (url, format, res) => {
     if (options.proxy) args.push('--proxy', options.proxy);
     if (options.referer) args.push('--referer', options.referer);
 
+    if (isInstagramUrl(url) && process.env.INSTAGRAM_COOKIES) {
+      args.push('--add-header', `cookie: ${process.env.INSTAGRAM_COOKIES}`);
+    }
+
     const ytdlProc = spawn(ytdlPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -385,6 +398,11 @@ const streamDownload = async (url, format, res) => {
       }
     });
   } catch (err) {
+    if (err.message.includes('login required') || 
+        err.message.includes('rate-limit reached')) {
+      res.status(401).json({ 
+        error: 'Instagram authentication required'
+      });
     console.error('Streaming error:', err);
     if (!res.headersSent) {
       res.status(500).json({ error: err.message || 'Stream failed' });
