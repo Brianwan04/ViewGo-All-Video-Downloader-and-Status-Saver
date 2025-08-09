@@ -1,27 +1,16 @@
 const validator = require('validator');
 const { URL } = require('url');
 
-const sanitizeSearchQuery = (query) => {
-  if (typeof query !== 'string') {
-    throw new Error('Search query must be a string');
-  }
-
-  // Remove special characters and limit length
-  return query.trim()
-    .replace(/[^\w\s-]/g, '')
-    .substring(0, 100);
-};
-
-const sanitizeTrailing = (s) => s.replace(/^[<\s"']+|[>\s"']+$/g, '').replace(/[),.?!]+$/g, '');
-
 const extractFirstUrlFromText = (text) => {
   if (!text || typeof text !== 'string') return null;
 
-  // 1) Prefer vm.tiktok.com shortlinks (with or without protocol)
-  const vmMatch = text.match(/(?:https?:\/\/)?vm\.tiktok\.com\/[A-Za-z0-9\/_\-\.]+/i);
+  // 1) Prefer vm.tiktok.com shortlinks (stricter: only valid shortlink IDs)
+  const vmMatch = text.match(/(?:https?:\/\/)?vm\.tiktok\.com\/[A-Za-z0-9]+\/?/i);
   if (vmMatch) {
     let out = vmMatch[0];
     if (!out.startsWith('http')) out = `https://${out}`;
+    // Ensure trailing slash for TikTok shortlinks
+    if (!out.endsWith('/')) out += '/';
     return sanitizeTrailing(out);
   }
 
@@ -44,22 +33,12 @@ const extractFirstUrlFromText = (text) => {
   return null;
 };
 
-// --- replace extraction logic inside validateUrl with this ---
-if (typeof urlCandidate === 'string') {
-  // Always attempt extraction — prefer vm.tiktok shortlinks inside the text
-  const extracted = extractFirstUrlFromText(urlCandidate);
-  if (extracted) {
-    urlCandidate = extracted;
-  }
-}
+const sanitizeTrailing = (s) => s.replace(/^[<\s"']+|[>\s"']+$/g, '').replace(/[),.?!]+$/g, '');
 
-/**
- * Validate & normalize URL input (updated to accept messy TikTok Lite share text)
- */
 const validateUrl = (inputUrl) => {
   let urlCandidate = inputUrl;
 
-  // If input is a string, always try to extract a clean URL first
+  // Always try to extract a clean URL first if input is a string
   if (typeof urlCandidate === 'string') {
     const extracted = extractFirstUrlFromText(urlCandidate);
     if (extracted) {
@@ -91,30 +70,21 @@ const validateUrl = (inputUrl) => {
   })) {
     throw new Error('Invalid URL format');
   }
-/*const validateUrl = (inputUrl) => {
-  let url = inputUrl;
 
-  // Add protocol if missing
-  if (!url.includes('://')) {
-    url = 'https://' + url;
+  // Additional validation for TikTok shortlinks
+  if (urlCandidate.includes('vm.tiktok.com')) {
+    if (!urlCandidate.match(/^https:\/\/vm\.tiktok\.com\/[A-Za-z0-9]+\/$/)) {
+      throw new Error('Invalid TikTok shortlink format');
+    }
   }
 
-  // Validate URL format
-  if (!validator.isURL(url, {
-    protocols: ['http','https'],
-    require_protocol: true,
-    allow_underscores: true,
-  })) {
-    throw new Error('Invalid URL format');
-  }
-*/
   // Validate supported platforms
   const supportedPlatforms = [
     'youtube.com',
     'youtu.be',
     'tiktok.com',
-    'vm.tiktok.com',         // short links
-    'tiktoklite.com',       // lite domain if it ever appears
+    'vm.tiktok.com',
+    'tiktoklite.com',
     'instagram.com',
     'facebook.com',
     'fb.watch',
@@ -140,8 +110,7 @@ const validateUrl = (inputUrl) => {
     'dai.ly.com'
   ];
 
-
-   let hostname;
+  let hostname;
   try {
     hostname = new URL(urlCandidate).hostname.toLowerCase();
   } catch (e) {
@@ -164,7 +133,7 @@ const validateUrlInputGET = (req, res, next) => {
   }
 
   try {
-    req.validatedUrl = validateUrl(url);
+    req.validatedUrl = validateUrl(decodeURIComponent(url)); // Decode URL-encoded input
     next();
   } catch (error) {
     res.status(400).json({ error: error.message });
@@ -198,7 +167,12 @@ module.exports = {
   extractFirstUrlFromText,
   validateUrl,
   validateSearchInput,
-  validateUrlInputGET,  // For GET requests
-  validateUrlInputPOST, // For POST requests
-  sanitizeSearchQuery
+  validateUrlInputGET,
+  validateUrlInputPOST,
+  sanitizeSearchQuery: (query) => {
+    if (typeof query !== 'string') {
+      throw new Error('Search query must be a string');
+    }
+    return query.trim().replace(/[^\w\s-]/g, '').substring(0, 100);
+  }
 };
