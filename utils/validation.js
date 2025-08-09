@@ -59,16 +59,12 @@ if (typeof urlCandidate === 'string') {
 const validateUrl = (inputUrl) => {
   let urlCandidate = inputUrl;
 
-  // if input looks like large pasted text, try to extract URL first
-  if (typeof urlCandidate === 'string' && urlCandidate.length > 100 && !urlCandidate.includes('://')) {
+  // If input is a string, always try to extract a clean URL first
+  if (typeof urlCandidate === 'string') {
     const extracted = extractFirstUrlFromText(urlCandidate);
-    if (extracted) urlCandidate = extracted;
-  }
-
-  // If still not found and input is a string, try to extract anyway
-  if (typeof urlCandidate === 'string' && !urlCandidate.includes('://')) {
-    const maybe = extractFirstUrlFromText(urlCandidate);
-    if (maybe) urlCandidate = maybe;
+    if (extracted) {
+      urlCandidate = extracted;
+    }
   }
 
   if (!urlCandidate) {
@@ -89,13 +85,12 @@ const validateUrl = (inputUrl) => {
 
   // Validate URL format
   if (!validator.isURL(urlCandidate, {
-    protocols: ['http','https'],
+    protocols: ['http', 'https'],
     require_protocol: true,
     allow_underscores: true,
   })) {
     throw new Error('Invalid URL format');
   }
-
 /*const validateUrl = (inputUrl) => {
   let url = inputUrl;
 
