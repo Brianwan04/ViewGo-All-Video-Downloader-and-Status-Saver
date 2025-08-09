@@ -12,24 +12,46 @@ const sanitizeSearchQuery = (query) => {
     .substring(0, 100);
 };
 
+const sanitizeTrailing = (s) => s.replace(/^[<\s"']+|[>\s"']+$/g, '').replace(/[),.?!]+$/g, '');
+
 const extractFirstUrlFromText = (text) => {
   if (!text || typeof text !== 'string') return null;
 
-  // Try to match https:// or http:// or www.x or vm.tiktok.com/... (no protocol)
-  const regex = /(https?:\/\/[^\s]+)/i;
-  let match = text.match(regex);
-  if (match) return match[0].replace(/[),.?!]+$/g, ''); // strip trailing punctuation
+  // 1) Prefer vm.tiktok.com shortlinks (with or without protocol)
+  const vmMatch = text.match(/(?:https?:\/\/)?vm\.tiktok\.com\/[A-Za-z0-9\/_\-\.]+/i);
+  if (vmMatch) {
+    let out = vmMatch[0];
+    if (!out.startsWith('http')) out = `https://${out}`;
+    return sanitizeTrailing(out);
+  }
 
-  // match www.something (no protocol)
-  match = text.match(/(www\.[^\s]+)/i);
-  if (match) return `https://${match[0].replace(/[),.?!]+$/g, '')}`;
+  // 2) Match http(s)://... up to whitespace (generic)
+  const httpMatch = text.match(/https?:\/\/[^\s)'"<>]+/i);
+  if (httpMatch) return sanitizeTrailing(httpMatch[0]);
 
-  // match vm.tiktok.com shortlinks without protocol (common in "shared" text)
-  match = text.match(/(vm\.tiktok\.com\/[A-Za-z0-9\/_\-\.]+)/i);
-  if (match) return `https://${match[0].replace(/[),.?!]+$/g, '')}`;
+  // 3) Match www.something (no protocol)
+  const wwwMatch = text.match(/(?:www\.)[^\s)'"<>]+/i);
+  if (wwwMatch) return sanitizeTrailing(`https://${wwwMatch[0]}`);
+
+  // 4) Generic domain.tld/... fallback
+  const domainMatch = text.match(/[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:\/[^\s]*)?/i);
+  if (domainMatch) {
+    let candidate = domainMatch[0];
+    if (!candidate.startsWith('http')) candidate = `https://${candidate}`;
+    return sanitizeTrailing(candidate);
+  }
 
   return null;
 };
+
+// --- replace extraction logic inside validateUrl with this ---
+if (typeof urlCandidate === 'string') {
+  // Always attempt extraction — prefer vm.tiktok shortlinks inside the text
+  const extracted = extractFirstUrlFromText(urlCandidate);
+  if (extracted) {
+    urlCandidate = extracted;
+  }
+}
 
 /**
  * Validate & normalize URL input (updated to accept messy TikTok Lite share text)
