@@ -178,6 +178,7 @@ const validateSearchInput = (req, res, next) => {
 };
 
 module.exports = {
+  extractFirstUrlFromText,
   validateUrl,
   validateSearchInput,
   validateUrlInputGET,  // For GET requests
