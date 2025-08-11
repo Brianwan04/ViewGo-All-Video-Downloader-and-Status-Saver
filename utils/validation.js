@@ -107,8 +107,7 @@ const validateUrl = (inputUrl) => {
     'triller.co',
     '9gag.com',
     'dai.ly',
-    'dai.ly.com',
-    'threads.com'
+    'dai.ly.com'
   ];
 
   let hostname;
