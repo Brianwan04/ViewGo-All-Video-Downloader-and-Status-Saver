@@ -22,17 +22,20 @@ const PLATFORM_CONFIGS = {
         player_client: 'android',
       },
     },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
     referer: 'https://www.youtube.com/',
   },
   instagram: {
-    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+    userAgent:
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
     referer: 'https://www.instagram.com/',
     forceIpv4: true,
     proxy: process.env.INSTAGRAM_PROXY || '',
   },
   facebook: {
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
     extractorArgs: {
       facebook: {
         skip_auth: true,
@@ -41,14 +44,19 @@ const PLATFORM_CONFIGS = {
     },
   },
   default: {
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
     referer: 'https://www.google.com/',
   },
 };
 
-const isInstagramUrl = (url) => /instagram\.com/i.test(url);
+const isInstagramUrl = (url) => {
+  return /instagram\.com/i.test(url);
+};
 
-const getVideoUrl = (input) => typeof input === 'string' ? input : input.url;
+const getVideoUrl = (input) => {
+  return typeof input === 'string' ? input : input.url;
+};
 
 const buildYtdlOptions = (input, extraOptions = {}) => {
   const config = typeof input === 'object' ? input.config || {} : {};
@@ -68,7 +76,9 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
       baseOptions.addHeader = baseOptions.addHeader || [];
       baseOptions.addHeader.push(`cookie: ${process.env.INSTAGRAM_COOKIES}`);
     }
-    if (process.env.INSTAGRAM_PROXY) baseOptions.proxy = process.env.INSTAGRAM_PROXY;
+    if (process.env.INSTAGRAM_PROXY) {
+      baseOptions.proxy = process.env.INSTAGRAM_PROXY;
+    }
   }
 
   if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
@@ -93,51 +103,6 @@ const getFormats = async (url) => {
 
     const info = await ytdl(videoUrl, options);
 
-    // Temporary file for size estimation
-    const tempFile = path.join(DOWNLOAD_DIR, `temp_${Date.now()}.mp4`);
-    let estimatedSizes = {};
-
-    try {
-      const args = [
-        videoUrl,
-        '-o', tempFile,
-        '--no-part',
-        '--no-check-certificates',
-        '--merge-output-format', 'mp4',
-        '--simulate', // Simulate download to get size without saving
-      ];
-
-      if (options.addHeader) options.addHeader.forEach((hdr) => args.push('--add-header', hdr));
-      if (options.userAgent) args.push('--user-agent', options.userAgent);
-      if (options.proxy) args.push('--proxy', options.proxy);
-      if (options.referer) args.push('--referer', options.referer);
-
-      const ytdlProc = spawn(ytdlPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-
-      let sizeMatch = null;
-      ytdlProc.stderr.on('data', (data) => {
-        const line = data.toString();
-        const match = line.match(/\[download\]\s+\d+\.\d+% of\s+([\d\.]+)([KMG]iB)/);
-        if (match) {
-          const [, sizeStr, unit] = match;
-          sizeMatch = parseFloat(sizeStr) * (unit === 'GiB' ? 1024 * 1024 * 1024 : unit === 'MiB' ? 1024 * 1024 : 1024);
-        }
-      });
-
-      await new Promise((resolve, reject) => {
-        ytdlProc.on('close', (code) => (code === 0 ? resolve() : reject(new Error('Simulation failed'))));
-        ytdlProc.on('error', reject);
-      });
-
-      if (sizeMatch) {
-        estimatedSizes[info.formats[0].format_id] = sizeMatch; // Assign to the first format as a default
-      }
-    } catch (err) {
-      console.warn('Size estimation failed:', err.message);
-    } finally {
-      if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
-    }
-
     return info.formats
       .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none')
       .map((f) => ({
@@ -145,7 +110,7 @@ const getFormats = async (url) => {
         ext: f.ext,
         resolution: f.resolution || `${f.height}p` || 'unknown',
         format_note: f.format_note,
-        filesize: estimatedSizes[f.format_id] || f.filesize || f.filesize_approx || null,
+        filesize: f.filesize || f.filesize_approx || null,
       }));
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
@@ -166,7 +131,6 @@ const getVideoPreview = async (url) => {
 
       const info = await ytdl(videoUrl, options);
 
-      // Use estimated size if available from getFormats (not directly here)
       return {
         id: info.id || videoUrl,
         title: info.title,
@@ -175,7 +139,7 @@ const getVideoPreview = async (url) => {
         platform: info.extractor_key,
         uploader: info.uploader,
         view_count: info.view_count,
-        fileSize: info.filesize || info.filesize_approx || null,
+        fileSize: info.filesize || info.filesize_approx || null
       };
     } catch (error) {
       retries++;
@@ -385,9 +349,11 @@ const streamDownload = async (url, format, res) => {
     const extension = 'mp4';
 
     const fileSize = info.filesize || info.filesize_approx;
-    if (fileSize) {
-      res.setHeader('Content-Length', fileSize);
-    }
+
+  /*if (fileSize) {
+    res.setHeader('Content-Length', fileSize);
+  }
+*/
 
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
