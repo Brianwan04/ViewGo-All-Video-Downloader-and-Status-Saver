@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const EventEmitter = require('events');
 const ytdl = require('yt-dlp-exec');
+const got = require('got');
 const ytdlPath = path.join(__dirname, '../bin/yt-dlp');
 const { validateUrl } = require('../utils/validation');
 
@@ -385,7 +386,7 @@ const scheduleFileDeletion = (filePath) => {
   }, retentionMinutes * 60 * 1000);
 };
 
-const streamDownload = async (url, format, res) => {
+const streamDownload = async (url, format, res, req) => {
   const videoUrl = getVideoUrl(url);
 
   try {
@@ -398,32 +399,90 @@ const streamDownload = async (url, format, res) => {
     const safeTitle = (info.title || 'video').replace(/[^\w\s]/gi, '');
     const extension = 'mp4';
 
-    // Prefer a progressive format with known filesize
+    // Prefer a progressive format with known filesize and also a direct URL
     const progressiveWithSize = (info.formats || [])
       .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
       .map(f => ({ ...f, filesize: f.filesize || f.filesize_approx || null }))
       .filter(f => f.filesize && (f.ext === 'mp4' || (f.protocol && /https?|http/.test(String(f.protocol)))))
       .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
 
-    const fileSize = progressiveWithSize?.filesize || info.filesize || info.filesize_approx || null;
-    const chosenFormatId = progressiveWithSize?.format_id || format || 'best';
+    const chosenFormat = progressiveWithSize || (info.formats || []).find(f => f.format_id === format) || null;
 
-    // If it's an HLS/m3u8 type we should NOT set Content-Length (it's chunked)
-    const chosenFormatObj = (info.formats || []).find(f => f.format_id === chosenFormatId) || {};
-    const isHls = chosenFormatObj && (chosenFormatObj.ext === 'm3u8_native' || (chosenFormatObj.url && chosenFormatObj.url.includes('.m3u8')));
-
-    if (fileSize && !isHls) {
-      // ensure string
-      res.setHeader('Content-Length', String(fileSize));
-    }
-
+    // prepare response headers
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
 
+    // Helper to cleanly kill child and destroy streams
+    const killChild = (child) => {
+      try { if (child && !child.killed) child.kill('SIGTERM'); } catch(e) {}
+    };
+
+    // If chosen format gives us a direct URL, proxy that URL (preserves real Content-Length)
+    if (chosenFormat && chosenFormat.url) {
+      const proxyUrl = chosenFormat.url;
+      const contentLength = chosenFormat.filesize || chosenFormat.filesize_approx || info.filesize || info.filesize_approx || null;
+
+      // If we have content-length, set it (got's response may also include it)
+      if (contentLength) {
+        res.setHeader('Content-Length', String(contentLength));
+      }
+
+      // Stream using got (handles redirects & TLS better)
+      const streamOpts = {
+        headers: {}
+      };
+      // forward cookie or user-agent if necessary
+      if (options.addHeader) {
+        // options.addHeader is an array like ['cookie: ...'] — convert to header map
+        options.addHeader.forEach(h => {
+          const [k, ...rest] = h.split(':');
+          if (k && rest.length) streamOpts.headers[k.trim()] = rest.join(':').trim();
+        });
+      }
+      if (options.userAgent) streamOpts.headers['user-agent'] = options.userAgent;
+      if (options.referer) streamOpts.headers['referer'] = options.referer;
+
+      const upstream = got.stream(proxyUrl, streamOpts);
+
+      upstream.on('response', upstreamResp => {
+        // if upstream provides its own content-length, ensure we forward it (overrides chosenFormat.filesize)
+        if (upstreamResp.headers['content-length']) {
+          res.setHeader('Content-Length', upstreamResp.headers['content-length']);
+        }
+      });
+
+      upstream.on('error', err => {
+        console.error('Upstream stream error:', err && err.message);
+        // if client already aborted, nothing more to do
+        if (!res.headersSent) {
+          res.status(502).end('Upstream stream error');
+        } else {
+          try { res.destroy(); } catch(e) {}
+        }
+      });
+
+      // if client disconnects, destroy upstream
+      req.on('close', () => {
+        try { upstream.destroy(); } catch(e) {}
+      });
+
+      // pipe upstream -> client
+      upstream.pipe(res);
+
+      // when client closes, stop upstream
+      res.on('close', () => {
+        try { upstream.destroy(); } catch(e) {}
+      });
+
+      return;
+    }
+
+    // FALLBACK: no direct format URL — spawn yt-dlp and pipe stdout
+    // IMPORTANT: do NOT set Content-Length here (we can't guarantee exact length)
     const args = [
       videoUrl,
       '-f',
-      chosenFormatId,
+      format || (chosenFormat ? chosenFormat.format_id : 'best'),
       '-o',
       '-',
       '--no-part',
@@ -447,38 +506,42 @@ const streamDownload = async (url, format, res) => {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    // pipe child stdout to response (chunked)
     ytdlProc.stdout.pipe(res);
+
+    // when client disconnects, kill child
+    req.on('close', () => {
+      killChild(ytdlProc);
+    });
+
+    // error handlers
     ytdlProc.stderr.on('data', (data) => {
+      // still log stderr for debugging, but we rely on startDownload SSE for percent
       console.error('[yt-dlp stderr]', data.toString());
     });
 
     ytdlProc.on('error', (err) => {
       console.error('Failed to spawn yt-dlp:', err);
       if (!res.headersSent) res.status(500).end('Download failed');
+      killChild(ytdlProc);
     });
 
     ytdlProc.on('close', (code) => {
       if (code !== 0 && !res.headersSent) {
-        res.status(500).end('Download failed');
+        console.error('yt-dlp closed with code', code);
+        // if headers not sent, respond with error
+        if (!res.headersSent) res.status(500).end('Download failed');
       }
     });
 
-    res.on('close', () => {
-      if (!ytdlProc.killed) ytdlProc.kill('SIGTERM');
+    res.on('error', (err) => {
+      console.error('Response error (client likely aborted):', err && err.message);
+      killChild(ytdlProc);
     });
 
-    res.setTimeout(300000, () => {
-      if (!res.headersSent) {
-        res.status(504).end('Download timeout');
-        ytdlProc.kill('SIGTERM');
-      }
-    });
   } catch (err) {
-    if (err.message.includes('login required') || 
-        err.message.includes('rate-limit reached')) {
-      res.status(401).json({ 
-        error: 'Instagram authentication required'
-      });
+    if (err.message.includes('login required') || err.message.includes('rate-limit reached')) {
+      res.status(401).json({ error: 'Instagram authentication required' });
     } else {
       console.error('Streaming error:', err);
       if (!res.headersSent) {
