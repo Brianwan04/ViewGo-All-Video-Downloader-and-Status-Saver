@@ -99,35 +99,34 @@ const getFormats = async (url) => {
     const options = buildYtdlOptions(url, {
       dumpSingleJson: true,
       preferFreeFormats: true,
-      mergeOutputFormat: 'mp4', // Ensure merged MP4 formats
     });
 
     const info = await ytdl(videoUrl, options);
 
-    const formats = info.formats
-      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none' && f.ext === 'mp4') // Prioritize MP4 with both video/audio
+    // map formats and normalize filesize
+    const formats = (info.formats || [])
+      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none')
       .map((f) => ({
         format_id: f.format_id,
         ext: f.ext,
         resolution: f.resolution || (f.height ? `${f.height}p` : 'unknown'),
-        format_note: f.format_note || 'unknown',
+        format_note: f.format_note,
+        protocol: f.protocol || null,
+        url: f.url || null,
         filesize: f.filesize || f.filesize_approx || null,
-      }))
-      .sort((a, b) => {
-        // Prioritize formats with filesize, then by resolution (height)
-        if (a.filesize && !b.filesize) return -1;
-        if (!a.filesize && b.filesize) return 1;
-        return (b.height || 0) - (a.height || 0);
-      });
+        // helpful for selection: progressive if ext is mp4 or protocol is http/https
+        progressive: (f.ext && f.ext.toLowerCase() === 'mp4') ||
+                    (f.protocol && /https?|http/.test(String(f.protocol))),
+      }));
 
-    // Fallback to 'best' format if no formats with filesize are found
-    return formats.length > 0 ? formats : [{
-      format_id: 'best',
-      ext: 'mp4',
-      resolution: 'unknown',
-      format_note: 'default',
-      filesize: null,
-    }];
+    // sort so formats with known filesize and progressive come first
+    formats.sort((a, b) => {
+      const aScore = (a.filesize ? 2 : 0) + (a.progressive ? 1 : 0);
+      const bScore = (b.filesize ? 2 : 0) + (b.progressive ? 1 : 0);
+      return bScore - aScore;
+    });
+
+    return formats;
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
   }
@@ -147,6 +146,17 @@ const getVideoPreview = async (url) => {
 
       const info = await ytdl(videoUrl, options);
 
+      // choose the best progressive format with filesize if available
+      const progressive = (info.formats || [])
+        .filter(f => f.vcodec !== 'none' && f.acodec !== 'none' &&
+                     (f.ext === 'mp4' || (f.protocol && /https?|http/.test(String(f.protocol)))))
+        .map(f => ({ ...f, filesize: f.filesize || f.filesize_approx || null }))
+        .filter(f => f.filesize)
+        .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
+
+      const fileSize = progressive?.filesize || info.filesize || info.filesize_approx || null;
+      const preferred_format = progressive?.format_id || null;
+
       return {
         id: info.id || videoUrl,
         title: info.title,
@@ -155,7 +165,8 @@ const getVideoPreview = async (url) => {
         platform: info.extractor_key,
         uploader: info.uploader,
         view_count: info.view_count,
-        fileSize: info.filesize || info.filesize_approx || null
+        fileSize,
+        preferred_format,
       };
     } catch (error) {
       retries++;
@@ -167,101 +178,81 @@ const getVideoPreview = async (url) => {
   }
 };
 
-const streamDownload = async (url, format, res) => {
+
+const getStreamUrl = async (url, format) => {
   const videoUrl = getVideoUrl(url);
+  const options = buildYtdlOptions(url, {
+    dumpSingleJson: true,
+    format: format || 'best',
+  });
 
-  try {
-    const options = buildYtdlOptions(url, {
-      dumpSingleJson: true,
-      format: format || 'best',
-    });
+  const info = await ytdl(videoUrl, options);
 
-    const info = await ytdl(videoUrl, options);
-    const safeTitle = (info.title || 'video').replace(/[^\w\s]/gi, '');
-    const extension = 'mp4';
+  // 1. HLS (m3u8) detection (we return it if caller explicitly wants streaming)
+  const hlsFormat = (info.formats || []).find(
+    (f) => f.ext === 'm3u8_native' || f.protocol === 'm3u8_native' || (f.url && f.url.includes('.m3u8'))
+  );
+  if (hlsFormat?.url) {
+    return {
+      url: hlsFormat.url,
+      format: hlsFormat.format_id,
+      duration: info.duration,
+      title: info.title,
+      type: 'hls',
+    };
+  }
 
-    const chosenFormat = info.formats.find(f => f.format_id === format) || info.formats[0];
-    const fileSize = chosenFormat?.filesize || chosenFormat?.filesize_approx || null;
-
-    if (fileSize) {
-      res.setHeader('Content-Length', fileSize);
-    } else {
-      // Warn if no size, but proceed (client will use bytesWritten)
-      console.warn('No filesize available for format', format, 'using chunked encoding');
-    }
-
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
-
-    const args = [
-      videoUrl,
-      '-f', format || 'best',
-      '-o', '-',
-      '--no-part',
-      '--no-check-certificates',
-      '--merge-output-format', 'mp4',
-      '--hls-prefer-native', // Prefer native HLS handling for stability
-    ];
-
-    if (options.addHeader) {
-      options.addHeader.forEach((hdr) => args.push('--add-header', hdr));
-    }
-    if (options.userAgent) args.push('--user-agent', options.userAgent);
-    if (options.proxy) args.push('--proxy', options.proxy);
-    if (options.referer) args.push('--referer', options.referer);
-
-    if (isInstagramUrl(url) && process.env.INSTAGRAM_COOKIES) {
-      args.push('--add-header', `cookie: ${process.env.INSTAGRAM_COOKIES}`);
-    }
-
-    const ytdlProc = spawn(ytdlPath, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    ytdlProc.stdout.pipe(res);
-
-    ytdlProc.stderr.on('data', (data) => {
-      const line = data.toString();
-      console.log('[yt-dlp stderr]', line); // Log all stderr for debugging
-      const match = line.match(/download\s+(\d+\.\d+)%/);
-      if (match) {
-        const progress = parseFloat(match[1]);
-        // Optionally send progress via SSE (requires setupProgressStream integration)
-      }
-    });
-
-    ytdlProc.on('error', (err) => {
-      console.error('Failed to spawn yt-dlp:', err);
-      if (!res.headersSent) res.status(500).end('Download failed');
-    });
-
-    ytdlProc.on('close', (code) => {
-      if (code !== 0 && !res.headersSent) {
-        res.status(500).end('Download failed');
-      } else if (!res.writableEnded) {
-        res.end(); // Ensure response is closed cleanly
-      }
-    });
-
-    res.on('close', () => {
-      if (!ytdlProc.killed) ytdlProc.kill('SIGTERM');
-    });
-
-    res.setTimeout(600000, () => { // Increase to 10 minutes
-      if (!res.headersSent) {
-        res.status(504).end('Download timeout');
-        ytdlProc.kill('SIGTERM');
-      }
-    });
-  } catch (err) {
-    if (err.message.includes('login required') || err.message.includes('rate-limit reached')) {
-      res.status(401).json({ error: 'Authentication required' });
-    } else {
-      console.error('Streaming error:', err);
-      if (!res.headersSent) res.status(500).json({ error: err.message || 'Stream failed' });
+  // 2. If specific format requested and exists, return it
+  if (format) {
+    const chosen = (info.formats || []).find((f) => f.format_id === format);
+    if (chosen?.url) {
+      return {
+        url: chosen.url,
+        format: chosen.format_id,
+        duration: info.duration,
+        title: info.title,
+        type: 'direct',
+      };
     }
   }
+
+  // 3. Prefer progressive formats with filesize (mp4 or https protocol)
+  const progressiveWithSize = (info.formats || [])
+    .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
+    .map(f => ({ ...f, filesize: f.filesize || f.filesize_approx || null }))
+    .filter(f => f.filesize && (f.ext === 'mp4' || (f.protocol && /https?|http/.test(String(f.protocol)))))
+    .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
+
+  if (progressiveWithSize?.url) {
+    return {
+      url: progressiveWithSize.url,
+      format: progressiveWithSize.format_id,
+      duration: info.duration,
+      title: info.title,
+      fileSize: progressiveWithSize.filesize,
+      type: 'direct',
+    };
+  }
+
+  // 4. fallback: pick the largest progressive (even if filesize unknown)
+  const progressive = (info.formats || [])
+    .filter(f => f.protocol === 'https' && f.vcodec !== 'none' && f.acodec !== 'none')
+    .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
+
+  if (progressive?.url) {
+    return {
+      url: progressive.url,
+      format: progressive.format_id,
+      duration: info.duration,
+      title: info.title,
+      fileSize: progressive.filesize || progressive.filesize_approx || null,
+      type: 'direct',
+    };
+  }
+
+  throw new Error('No suitable stream format found');
 };
+
 
 const startDownload = async (url, format) => {
   const id = uuidv4();
@@ -407,12 +398,24 @@ const streamDownload = async (url, format, res) => {
     const safeTitle = (info.title || 'video').replace(/[^\w\s]/gi, '');
     const extension = 'mp4';
 
-    const fileSize = info.filesize || info.filesize_approx;
+    // Prefer a progressive format with known filesize
+    const progressiveWithSize = (info.formats || [])
+      .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
+      .map(f => ({ ...f, filesize: f.filesize || f.filesize_approx || null }))
+      .filter(f => f.filesize && (f.ext === 'mp4' || (f.protocol && /https?|http/.test(String(f.protocol)))))
+      .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
 
-  if (fileSize) {
-    res.setHeader('Content-Length', fileSize);
-  }
+    const fileSize = progressiveWithSize?.filesize || info.filesize || info.filesize_approx || null;
+    const chosenFormatId = progressiveWithSize?.format_id || format || 'best';
 
+    // If it's an HLS/m3u8 type we should NOT set Content-Length (it's chunked)
+    const chosenFormatObj = (info.formats || []).find(f => f.format_id === chosenFormatId) || {};
+    const isHls = chosenFormatObj && (chosenFormatObj.ext === 'm3u8_native' || (chosenFormatObj.url && chosenFormatObj.url.includes('.m3u8')));
+
+    if (fileSize && !isHls) {
+      // ensure string
+      res.setHeader('Content-Length', String(fileSize));
+    }
 
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
@@ -420,7 +423,7 @@ const streamDownload = async (url, format, res) => {
     const args = [
       videoUrl,
       '-f',
-      format || 'best',
+      chosenFormatId,
       '-o',
       '-',
       '--no-part',
@@ -484,6 +487,7 @@ const streamDownload = async (url, format, res) => {
     }
   }
 };
+
 
 module.exports = {
   getFormats,
