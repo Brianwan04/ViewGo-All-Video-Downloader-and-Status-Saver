@@ -139,6 +139,7 @@ const getVideoPreview = async (url) => {
         platform: info.extractor_key,
         uploader: info.uploader,
         view_count: info.view_count,
+        fileSize: info.filesize || null
       };
     } catch (error) {
       retries++;
@@ -346,6 +347,13 @@ const streamDownload = async (url, format, res) => {
     const info = await ytdl(videoUrl, options);
     const safeTitle = (info.title || 'video').replace(/[^\w\s]/gi, '');
     const extension = 'mp4';
+
+    const fileSize = info.filesize || info.filesize_approx;
+
+  if (fileSize) {
+    res.setHeader('Content-Length', fileSize);
+  }
+
 
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
