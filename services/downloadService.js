@@ -110,7 +110,7 @@ const getFormats = async (url) => {
         ext: f.ext,
         resolution: f.resolution || `${f.height}p` || 'unknown',
         format_note: f.format_note,
-        filesize: f.filesize,
+        filesize: f.filesize || f.filesize_approx || null,
       }));
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
@@ -139,7 +139,7 @@ const getVideoPreview = async (url) => {
         platform: info.extractor_key,
         uploader: info.uploader,
         view_count: info.view_count,
-        fileSize: info.filesize || null
+        fileSize: info.filesize || info.filesize_approx || null
       };
     } catch (error) {
       retries++;
