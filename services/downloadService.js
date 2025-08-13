@@ -4,9 +4,12 @@ const { spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const EventEmitter = require('events');
 const ytdl = require('yt-dlp-exec');
-const got = require('got');
 const ytdlPath = path.join(__dirname, '../bin/yt-dlp');
 const { validateUrl } = require('../utils/validation');
+
+const http = require('http');
+const https = require('https');
+const { URL } = require('url');
 
 const DOWNLOAD_DIR = process.env.DOWNLOAD_DIR || path.join(__dirname, '../downloads');
 
@@ -386,6 +389,68 @@ const scheduleFileDeletion = (filePath) => {
   }, retentionMinutes * 60 * 1000);
 };
 
+async function proxyUrlToRes(proxyUrl, req, res, extraHeaders = {}) {
+  // Follow up to 5 redirects (basic)
+  const maxRedirects = 5;
+  let redirects = 0;
+  let currentUrl = proxyUrl;
+
+  return new Promise((resolve, reject) => {
+    const doRequest = (u) => {
+      try {
+        const parsed = new URL(u);
+        const client = parsed.protocol === 'https:' ? https : http;
+
+        const headers = {
+          'user-agent': extraHeaders['user-agent'] || 'Mozilla/5.0',
+          referer: extraHeaders['referer'] || undefined,
+          ...extraHeaders,
+        };
+
+        const opts = {
+          method: 'GET',
+          headers,
+        };
+
+        const upstreamReq = client.request(parsed, opts, (upRes) => {
+          // handle redirects
+          if (upRes.statusCode >= 300 && upRes.statusCode < 400 && upRes.headers.location && redirects < maxRedirects) {
+            redirects++;
+            currentUrl = upRes.headers.location;
+            upstreamReq.abort();
+            return doRequest(currentUrl);
+          }
+
+          // forward headers only if not already sent
+          if (!res.headersSent) {
+            if (upRes.headers['content-type']) res.setHeader('Content-Type', upRes.headers['content-type']);
+            if (upRes.headers['content-length']) res.setHeader('Content-Length', upRes.headers['content-length']);
+          }
+
+          // pipe
+          upRes.pipe(res);
+          upRes.on('end', () => resolve());
+        });
+
+        upstreamReq.on('error', (err) => {
+          reject(err);
+        });
+
+        // abort upstream if client closes
+        req.on('close', () => {
+          try { upstreamReq.abort(); } catch (e) {}
+        });
+
+        upstreamReq.end();
+      } catch (err) {
+        reject(err);
+      }
+    };
+
+    doRequest(currentUrl);
+  });
+}
+
 const streamDownload = async (url, format, res, req) => {
   const videoUrl = getVideoUrl(url);
 
@@ -399,7 +464,7 @@ const streamDownload = async (url, format, res, req) => {
     const safeTitle = (info.title || 'video').replace(/[^\w\s]/gi, '');
     const extension = 'mp4';
 
-    // Prefer a progressive format with known filesize and also a direct URL
+    // Prefer a progressive format with known filesize and direct URL
     const progressiveWithSize = (info.formats || [])
       .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
       .map(f => ({ ...f, filesize: f.filesize || f.filesize_approx || null }))
@@ -408,8 +473,7 @@ const streamDownload = async (url, format, res, req) => {
 
     const chosenFormat = progressiveWithSize || (info.formats || []).find(f => f.format_id === format) || null;
 
-    // prepare response headers
-    res.setHeader('Content-Type', 'video/mp4');
+    // set Content-Disposition early (safe)
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
 
     // Helper to cleanly kill child and destroy streams
@@ -420,65 +484,87 @@ const streamDownload = async (url, format, res, req) => {
     // If chosen format gives us a direct URL, proxy that URL (preserves real Content-Length)
     if (chosenFormat && chosenFormat.url) {
       const proxyUrl = chosenFormat.url;
-      const contentLength = chosenFormat.filesize || chosenFormat.filesize_approx || info.filesize || info.filesize_approx || null;
-
-      // If we have content-length, set it (got's response may also include it)
-      if (contentLength) {
-        res.setHeader('Content-Length', String(contentLength));
-      }
-
-      // Stream using got (handles redirects & TLS better)
-      const streamOpts = {
-        headers: {}
-      };
-      // forward cookie or user-agent if necessary
+      const extraHeaders = {};
+      if (options.userAgent) extraHeaders['user-agent'] = options.userAgent;
+      if (options.referer) extraHeaders['referer'] = options.referer;
       if (options.addHeader) {
-        // options.addHeader is an array like ['cookie: ...'] — convert to header map
         options.addHeader.forEach(h => {
           const [k, ...rest] = h.split(':');
-          if (k && rest.length) streamOpts.headers[k.trim()] = rest.join(':').trim();
+          if (k && rest.length) extraHeaders[k.trim()] = rest.join(':').trim();
         });
       }
-      if (options.userAgent) streamOpts.headers['user-agent'] = options.userAgent;
-      if (options.referer) streamOpts.headers['referer'] = options.referer;
 
-      const upstream = got.stream(proxyUrl, streamOpts);
+      // Prefer got.stream via dynamic import (handles redirects & TLS robustly)
+      let upstream;
+      try {
+        const { default: got } = await import('got'); // dynamic ESM import
+        upstream = got.stream(proxyUrl, { headers: extraHeaders });
+      } catch (err) {
+        // dynamic import or got failed — fall back to native proxy
+        console.warn('got import/stream failed, falling back to native proxy:', err && err.message);
+        try {
+          await proxyUrlToRes(proxyUrl, req, res, extraHeaders);
+          return;
+        } catch (proxyErr) {
+          console.error('native proxy failed:', proxyErr && proxyErr.message);
+          if (!res.headersSent) res.status(502).json({ error: 'Upstream proxy failed' });
+          return;
+        }
+      }
 
-      upstream.on('response', upstreamResp => {
-        // if upstream provides its own content-length, ensure we forward it (overrides chosenFormat.filesize)
-        if (upstreamResp.headers['content-length']) {
-          res.setHeader('Content-Length', upstreamResp.headers['content-length']);
+      if (!upstream || typeof upstream.on !== 'function') {
+        console.error('Upstream stream invalid, falling back to native proxy');
+        try {
+          await proxyUrlToRes(proxyUrl, req, res, extraHeaders);
+          return;
+        } catch (proxyErr) {
+          console.error('native proxy failed:', proxyErr && proxyErr.message);
+          if (!res.headersSent) res.status(502).json({ error: 'Upstream proxy failed' });
+          return;
+        }
+      }
+
+      // Only set Content-Length/Type if upstream provides them and headers are not sent yet
+      upstream.on('response', (upstreamResp) => {
+        try {
+          if (!res.headersSent) {
+            if (upstreamResp.headers['content-length']) {
+              res.setHeader('Content-Length', upstreamResp.headers['content-length']);
+            }
+            if (upstreamResp.headers['content-type'] && !res.getHeader('Content-Type')) {
+              res.setHeader('Content-Type', upstreamResp.headers['content-type']);
+            }
+          }
+        } catch (e) {
+          console.warn('Error while setting upstream headers', e && e.message);
         }
       });
 
-      upstream.on('error', err => {
+      upstream.on('error', (err) => {
         console.error('Upstream stream error:', err && err.message);
-        // if client already aborted, nothing more to do
         if (!res.headersSent) {
-          res.status(502).end('Upstream stream error');
+          try { res.status(502).end('Upstream stream error'); } catch (e) {}
         } else {
-          try { res.destroy(); } catch(e) {}
+          try { res.destroy(); } catch (e) {}
         }
       });
 
       // if client disconnects, destroy upstream
       req.on('close', () => {
-        try { upstream.destroy(); } catch(e) {}
+        try { upstream.destroy(); } catch (e) {}
       });
 
       // pipe upstream -> client
       upstream.pipe(res);
 
-      // when client closes, stop upstream
       res.on('close', () => {
-        try { upstream.destroy(); } catch(e) {}
+        try { upstream.destroy(); } catch (e) {}
       });
 
       return;
     }
 
-    // FALLBACK: no direct format URL — spawn yt-dlp and pipe stdout
-    // IMPORTANT: do NOT set Content-Length here (we can't guarantee exact length)
+    // FALLBACK: no direct format URL — spawn yt-dlp and pipe stdout (chunked)
     const args = [
       videoUrl,
       '-f',
@@ -516,7 +602,6 @@ const streamDownload = async (url, format, res, req) => {
 
     // error handlers
     ytdlProc.stderr.on('data', (data) => {
-      // still log stderr for debugging, but we rely on startDownload SSE for percent
       console.error('[yt-dlp stderr]', data.toString());
     });
 
@@ -529,7 +614,6 @@ const streamDownload = async (url, format, res, req) => {
     ytdlProc.on('close', (code) => {
       if (code !== 0 && !res.headersSent) {
         console.error('yt-dlp closed with code', code);
-        // if headers not sent, respond with error
         if (!res.headersSent) res.status(500).end('Download failed');
       }
     });
@@ -540,8 +624,8 @@ const streamDownload = async (url, format, res, req) => {
     });
 
   } catch (err) {
-    if (err.message.includes('login required') || err.message.includes('rate-limit reached')) {
-      res.status(401).json({ error: 'Instagram authentication required' });
+    if (err.message && (err.message.includes('login required') || err.message.includes('rate-limit reached'))) {
+      if (!res.headersSent) res.status(401).json({ error: 'Instagram authentication required' });
     } else {
       console.error('Streaming error:', err);
       if (!res.headersSent) {
