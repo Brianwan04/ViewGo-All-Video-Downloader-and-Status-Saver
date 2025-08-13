@@ -99,19 +99,35 @@ const getFormats = async (url) => {
     const options = buildYtdlOptions(url, {
       dumpSingleJson: true,
       preferFreeFormats: true,
+      mergeOutputFormat: 'mp4', // Ensure merged MP4 formats
     });
 
     const info = await ytdl(videoUrl, options);
 
-    return info.formats
-      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none')
+    const formats = info.formats
+      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none' && f.ext === 'mp4') // Prioritize MP4 with both video/audio
       .map((f) => ({
         format_id: f.format_id,
         ext: f.ext,
-        resolution: f.resolution || `${f.height}p` || 'unknown',
-        format_note: f.format_note,
+        resolution: f.resolution || (f.height ? `${f.height}p` : 'unknown'),
+        format_note: f.format_note || 'unknown',
         filesize: f.filesize || f.filesize_approx || null,
-      }));
+      }))
+      .sort((a, b) => {
+        // Prioritize formats with filesize, then by resolution (height)
+        if (a.filesize && !b.filesize) return -1;
+        if (!a.filesize && b.filesize) return 1;
+        return (b.height || 0) - (a.height || 0);
+      });
+
+    // Fallback to 'best' format if no formats with filesize are found
+    return formats.length > 0 ? formats : [{
+      format_id: 'best',
+      ext: 'mp4',
+      resolution: 'unknown',
+      format_note: 'default',
+      filesize: null,
+    }];
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
   }
