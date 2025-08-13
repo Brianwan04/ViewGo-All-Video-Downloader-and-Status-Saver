@@ -167,57 +167,100 @@ const getVideoPreview = async (url) => {
   }
 };
 
-const getStreamUrl = async (url, format) => {
+const streamDownload = async (url, format, res) => {
   const videoUrl = getVideoUrl(url);
-  const options = buildYtdlOptions(url, {
-    format: format || 'best',
-    dumpSingleJson: true,
-  });
 
-  const info = await ytdl(videoUrl, options);
+  try {
+    const options = buildYtdlOptions(url, {
+      dumpSingleJson: true,
+      format: format || 'best',
+    });
 
-  const hlsFormat = info.formats.find(
-    (f) =>
-      f.ext === 'm3u8_native' ||
-      f.protocol === 'm3u8_native' ||
-      (f.url && f.url.includes('.m3u8'))
-  );
+    const info = await ytdl(videoUrl, options);
+    const safeTitle = (info.title || 'video').replace(/[^\w\s]/gi, '');
+    const extension = 'mp4';
 
-  if (hlsFormat?.url) {
-    return {
-      url: hlsFormat.url,
-      format: hlsFormat.format_id,
-      duration: info.duration,
-      title: info.title,
-    };
-  }
+    const chosenFormat = info.formats.find(f => f.format_id === format) || info.formats[0];
+    const fileSize = chosenFormat?.filesize || chosenFormat?.filesize_approx || null;
 
-  if (format) {
-    const chosen = info.formats.find((f) => f.format_id === format);
-    if (chosen?.url) {
-      return {
-        url: chosen.url,
-        format: chosen.format_id,
-        duration: info.duration,
-        title: info.title,
-      };
+    if (fileSize) {
+      res.setHeader('Content-Length', fileSize);
+    } else {
+      // Warn if no size, but proceed (client will use bytesWritten)
+      console.warn('No filesize available for format', format, 'using chunked encoding');
+    }
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
+
+    const args = [
+      videoUrl,
+      '-f', format || 'best',
+      '-o', '-',
+      '--no-part',
+      '--no-check-certificates',
+      '--merge-output-format', 'mp4',
+      '--hls-prefer-native', // Prefer native HLS handling for stability
+    ];
+
+    if (options.addHeader) {
+      options.addHeader.forEach((hdr) => args.push('--add-header', hdr));
+    }
+    if (options.userAgent) args.push('--user-agent', options.userAgent);
+    if (options.proxy) args.push('--proxy', options.proxy);
+    if (options.referer) args.push('--referer', options.referer);
+
+    if (isInstagramUrl(url) && process.env.INSTAGRAM_COOKIES) {
+      args.push('--add-header', `cookie: ${process.env.INSTAGRAM_COOKIES}`);
+    }
+
+    const ytdlProc = spawn(ytdlPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    ytdlProc.stdout.pipe(res);
+
+    ytdlProc.stderr.on('data', (data) => {
+      const line = data.toString();
+      console.log('[yt-dlp stderr]', line); // Log all stderr for debugging
+      const match = line.match(/download\s+(\d+\.\d+)%/);
+      if (match) {
+        const progress = parseFloat(match[1]);
+        // Optionally send progress via SSE (requires setupProgressStream integration)
+      }
+    });
+
+    ytdlProc.on('error', (err) => {
+      console.error('Failed to spawn yt-dlp:', err);
+      if (!res.headersSent) res.status(500).end('Download failed');
+    });
+
+    ytdlProc.on('close', (code) => {
+      if (code !== 0 && !res.headersSent) {
+        res.status(500).end('Download failed');
+      } else if (!res.writableEnded) {
+        res.end(); // Ensure response is closed cleanly
+      }
+    });
+
+    res.on('close', () => {
+      if (!ytdlProc.killed) ytdlProc.kill('SIGTERM');
+    });
+
+    res.setTimeout(600000, () => { // Increase to 10 minutes
+      if (!res.headersSent) {
+        res.status(504).end('Download timeout');
+        ytdlProc.kill('SIGTERM');
+      }
+    });
+  } catch (err) {
+    if (err.message.includes('login required') || err.message.includes('rate-limit reached')) {
+      res.status(401).json({ error: 'Authentication required' });
+    } else {
+      console.error('Streaming error:', err);
+      if (!res.headersSent) res.status(500).json({ error: err.message || 'Stream failed' });
     }
   }
-
-  const progressive = info.formats
-    .filter((f) => f.protocol === 'https' && f.vcodec !== 'none' && f.acodec !== 'none')
-    .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
-
-  if (progressive?.url) {
-    return {
-      url: progressive.url,
-      format: progressive.format_id,
-      duration: info.duration,
-      title: info.title,
-    };
-  }
-
-  throw new Error('No suitable stream format found');
 };
 
 const startDownload = async (url, format) => {
