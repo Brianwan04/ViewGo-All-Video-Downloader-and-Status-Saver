@@ -464,7 +464,6 @@ const streamDownload = async (url, format, res, req) => {
     const safeTitle = (info.title || 'video').replace(/[^\w\s]/gi, '');
     const extension = 'mp4';
 
-    // Prefer a progressive format with known filesize and direct URL
     const progressiveWithSize = (info.formats || [])
       .filter(f => f.vcodec !== 'none' && f.acodec !== 'none')
       .map(f => ({ ...f, filesize: f.filesize || f.filesize_approx || null }))
@@ -473,72 +472,54 @@ const streamDownload = async (url, format, res, req) => {
 
     const chosenFormat = progressiveWithSize || (info.formats || []).find(f => f.format_id === format) || null;
 
-    // Set Content-Disposition early
+    res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
 
+    if (chosenFormat?.filesize) {
+      res.setHeader('Content-Length', chosenFormat.filesize);
+    }
+
     const killChild = (child) => {
-      try { if (child && !child.killed) child.kill('SIGTERM'); } catch (e) {}
+      try { if (child && !child.killed) child.kill('SIGTERM'); } catch(e) {}
     };
 
-    // Try proxying direct URL with got
     if (chosenFormat && chosenFormat.url) {
       const proxyUrl = chosenFormat.url;
-      const extraHeaders = {
-        'user-agent': options.userAgent || 'Mozilla/5.0',
-        referer: options.referer || undefined,
-        ...Object.fromEntries((options.addHeader || []).map(h => {
-          const [k, ...v] = h.split(':');
-          return [k.trim(), v.join(':').trim()];
-        })),
-      };
-
-      let upstream;
-      try {
-        const { default: got } = await import('got');
-        upstream = got.stream(proxyUrl, { headers: extraHeaders, timeout: { request: 30000 } });
-      } catch (importErr) {
-        console.error('Failed to import got:', importErr.message);
-        // Fall back to native proxy
+      const extraHeaders = {};
+      if (options.userAgent) extraHeaders['user-agent'] = options.userAgent;
+      if (options.referer) extraHeaders['referer'] = options.referer;
+      if (options.addHeader) {
+        options.addHeader.forEach(h => {
+          const [k, ...rest] = h.split(':');
+          if (k && rest.length) extraHeaders[k.trim()] = rest.join(':').trim();
+        });
       }
 
-      if (upstream && typeof upstream.on === 'function') {
-        upstream.on('response', (upstreamResp) => {
-          if (!res.headersSent) {
-            if (upstreamResp.headers['content-length']) {
-              res.setHeader('Content-Length', upstreamResp.headers['content-length']);
-            }
-            if (upstreamResp.headers['content-type'] && !res.getHeader('Content-Type')) {
-              res.setHeader('Content-Type', 'video/mp4');
-            }
-          }
-        });
-
-        upstream.on('error', (err) => {
-          console.error('Upstream stream error:', err.message);
-          if (!res.headersSent) res.status(502).end('Upstream stream error');
-        });
-
-        req.on('close', () => { try { upstream.destroy(); } catch (e) {} });
-        upstream.pipe(res);
-        res.on('close', () => { try { upstream.destroy(); } catch (e) {} });
+      try {
+        await proxyUrlToRes(proxyUrl, req, res, extraHeaders);
         return;
-      } else {
-        console.warn('got stream invalid, falling back to native proxy');
+      } catch (err) {
+        console.error('Direct URL proxy failed, falling back to yt-dlp spawn:', err.message);
+        // Continue to fallback spawn
       }
     }
 
-    // Fallback: Spawn yt-dlp and pipe stdout
+    // Fallback: Spawn yt-dlp
     const args = [
       videoUrl,
-      '-f', format || (chosenFormat ? chosenFormat.format_id : 'best'),
-      '-o', '-',
+      '-f',
+      format || (chosenFormat ? chosenFormat.format_id : 'best'),
+      '-o',
+      '-',
       '--no-part',
       '--no-check-certificates',
-      '--merge-output-format', 'mp4',
-      '--hls-prefer-native',
+      '--merge-output-format',
+      'mp4',
     ];
 
-    if (options.addHeader) options.addHeader.forEach((hdr) => args.push('--add-header', hdr));
+    if (options.addHeader) {
+      options.addHeader.forEach((hdr) => args.push('--add-header', hdr));
+    }
     if (options.userAgent) args.push('--user-agent', options.userAgent);
     if (options.proxy) args.push('--proxy', options.proxy);
     if (options.referer) args.push('--referer', options.referer);
@@ -547,12 +528,20 @@ const streamDownload = async (url, format, res, req) => {
       args.push('--add-header', `cookie: ${process.env.INSTAGRAM_COOKIES}`);
     }
 
-    const ytdlProc = spawn(ytdlPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const ytdlProc = spawn(ytdlPath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
 
     ytdlProc.stdout.pipe(res);
-    req.on('close', () => killChild(ytdlProc));
 
-    ytdlProc.stderr.on('data', (data) => console.error('[yt-dlp stderr]', data.toString()));
+    req.on('close', () => {
+      killChild(ytdlProc);
+    });
+
+    ytdlProc.stderr.on('data', (data) => {
+      console.error('[yt-dlp stderr]', data.toString());
+    });
+
     ytdlProc.on('error', (err) => {
       console.error('Failed to spawn yt-dlp:', err);
       if (!res.headersSent) res.status(500).end('Download failed');
@@ -561,23 +550,23 @@ const streamDownload = async (url, format, res, req) => {
 
     ytdlProc.on('close', (code) => {
       if (code !== 0 && !res.headersSent) {
-        console.error('yt-dlp closed with code', code);
-        if (!res.headersSent) res.status(500).end('Download failed');
+        res.status(500).end('Download failed');
       }
     });
 
-    res.on('error', (err) => {
-      console.error('Response error:', err.message);
+    res.on('close', () => {
       killChild(ytdlProc);
     });
 
+    res.setTimeout(300000, () => {
+      if (!res.headersSent) {
+        res.status(504).end('Download timeout');
+        killChild(ytdlProc);
+      }
+    });
   } catch (err) {
-    if (err.message && (err.message.includes('login required') || err.message.includes('rate-limit reached'))) {
-      if (!res.headersSent) res.status(401).json({ error: 'Authentication required' });
-    } else {
-      console.error('Streaming error:', err);
-      if (!res.headersSent) res.status(500).json({ error: err.message || 'Stream failed' });
-    }
+    console.error('Streaming error:', err);
+    if (!res.headersSent) res.status(500).json({ error: err.message || 'Stream failed' });
   }
 };
 
