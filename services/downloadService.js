@@ -99,34 +99,35 @@ const getFormats = async (url) => {
     const options = buildYtdlOptions(url, {
       dumpSingleJson: true,
       preferFreeFormats: true,
+      mergeOutputFormat: 'mp4', // Ensure merged MP4 formats
     });
 
     const info = await ytdl(videoUrl, options);
 
-    // map formats and normalize filesize
-    const formats = (info.formats || [])
-      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none')
+    const formats = info.formats
+      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none' && f.ext === 'mp4') // Prioritize MP4 with both video/audio
       .map((f) => ({
         format_id: f.format_id,
         ext: f.ext,
         resolution: f.resolution || (f.height ? `${f.height}p` : 'unknown'),
-        format_note: f.format_note,
-        protocol: f.protocol || null,
-        url: f.url || null,
+        format_note: f.format_note || 'unknown',
         filesize: f.filesize || f.filesize_approx || null,
-        // helpful for selection: progressive if ext is mp4 or protocol is http/https
-        progressive: (f.ext && f.ext.toLowerCase() === 'mp4') ||
-                    (f.protocol && /https?|http/.test(String(f.protocol))),
-      }));
+      }))
+      .sort((a, b) => {
+        // Prioritize formats with filesize, then by resolution (height)
+        if (a.filesize && !b.filesize) return -1;
+        if (!a.filesize && b.filesize) return 1;
+        return (b.height || 0) - (a.height || 0);
+      });
 
-    // sort so formats with known filesize and progressive come first
-    formats.sort((a, b) => {
-      const aScore = (a.filesize ? 2 : 0) + (a.progressive ? 1 : 0);
-      const bScore = (b.filesize ? 2 : 0) + (b.progressive ? 1 : 0);
-      return bScore - aScore;
-    });
-
-    return formats;
+    // Fallback to 'best' format if no formats with filesize are found
+    return formats.length > 0 ? formats : [{
+      format_id: 'best',
+      ext: 'mp4',
+      resolution: 'unknown',
+      format_note: 'default',
+      filesize: null,
+    }];
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
   }
