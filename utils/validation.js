@@ -4,8 +4,8 @@ const { URL } = require('url');
 const extractFirstUrlFromText = (text) => {
   if (!text || typeof text !== 'string') return null;
 
-  // 1) Prefer vm.tiktok.com shortlinks (stricter: only valid shortlink IDs)
-  const vmMatch = text.match(/(?:https?:\/\/)?vm\.tiktok\.com\/[A-Za-z0-9]+\/?/i);
+  // 1) Prefer vm.tiktok.com shortlinks (allow hyphens in ID)
+  const vmMatch = text.match(/(?:https?:\/\/)?vm\.tiktok\.com\/[A-Za-z0-9-]+\/?/i);
   if (vmMatch) {
     let out = vmMatch[0];
     if (!out.startsWith('http')) out = `https://${out}`;
@@ -37,12 +37,14 @@ const sanitizeTrailing = (s) => s.replace(/^[<\s"']+|[>\s"']+$/g, '').replace(/[
 
 const validateUrl = (inputUrl) => {
   let urlCandidate = inputUrl;
+  console.log(`Validating input URL: ${inputUrl}`); // Debug log
 
   // Always try to extract a clean URL first if input is a string
   if (typeof urlCandidate === 'string') {
     const extracted = extractFirstUrlFromText(urlCandidate);
     if (extracted) {
       urlCandidate = extracted;
+      console.log(`Extracted URL: ${urlCandidate}`); // Debug log
     }
   }
 
@@ -73,7 +75,7 @@ const validateUrl = (inputUrl) => {
 
   // Additional validation for TikTok shortlinks
   if (urlCandidate.includes('vm.tiktok.com')) {
-    if (!urlCandidate.match(/^https:\/\/vm\.tiktok\.com\/[A-Za-z0-9]+\/$/)) {
+    if (!urlCandidate.match(/^https:\/\/vm\.tiktok\.com\/[A-Za-z0-9-]+\/$/)) {
       throw new Error('Invalid TikTok shortlink format');
     }
   }
@@ -103,6 +105,7 @@ const validateUrl = (inputUrl) => {
     'bilibili.com',
     'snapchat.com',
     'threads.net',
+    'threads.com',
     'likee.video',
     'triller.co',
     '9gag.com',
