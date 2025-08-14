@@ -97,49 +97,51 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   return { ...baseOptions, ...extraOptions };
 };
 
+// Enhanced file size calculation with better bitrate handling
+const calculateFileSize = (format, duration) => {
+  // Return exact size if available
+  if (format.filesize) return format.filesize;
+  if (format.filesize_approx) return format.filesize_approx;
+  
+  // Calculate from bitrates if available
+  let totalBitrate = format.tbr;
+  
+  if (!totalBitrate) {
+    // Sum video and audio bitrates separately
+    const videoBitrate = format.vbr || format.vbitrate || 0;
+    const audioBitrate = format.abr || format.abitrate || 0;
+    totalBitrate = videoBitrate + audioBitrate;
+  }
+  
+  if (totalBitrate && duration) {
+    // Convert to bytes: (bitrate * 1000 * duration) / 8
+    return (totalBitrate * 1000 * duration) / 8;
+  }
+  
+  return null;
+};
+
+// Enhanced format selection for Facebook/Instagram
 const getBestFormatForSizeCalculation = (formats) => {
-  // Prefer formats with both video and audio
-  const combined = formats.filter(f => 
+  // Prefer progressive formats with both audio and video
+  const progressive = formats.filter(f => 
+    f.protocol === 'https' && 
     f.vcodec !== 'none' && 
-    f.acodec !== 'none' &&
-    f.filesize
+    f.acodec !== 'none'
   );
   
-  if (combined.length > 0) {
-    return combined.sort((a, b) => 
-      (b.filesize || 0) - (a.filesize || 0)
-    )[0];
-  }
-
-  // Fallback to largest video format
-  return formats
-    .filter(f => f.vcodec !== 'none')
-    .sort((a, b) => 
+  if (progressive.length > 0) {
+    return progressive.sort((a, b) => 
       (b.width || 0) - (a.width || 0) || 
       (b.height || 0) - (a.height || 0)
     )[0];
-};
-
-const calculateFileSize = (format, duration) => {
-  // 1. Return exact size if available
-  if (format.filesize) return format.filesize;
-  if (format.filesize_approx) return format.filesize_approx;
-
-  // 2. Calculate from video/audio bitrates
-  const videoBitrate = format.vbr || format.vbitrate || 0;
-  const audioBitrate = format.abr || format.abitrate || 0;
-  const totalBitrate = videoBitrate + audioBitrate;
-
-  if (totalBitrate && duration) {
-    return (totalBitrate * 1000 * duration) / 8;
   }
-
-  // 3. Facebook/Instagram specific fallback
-  if (format.tbr) {
-    return (format.tbr * 1000 * (duration || 60)) / 8;
-  }
-
-  return null;
+  
+  // Fallback to highest resolution format
+  return formats.sort((a, b) => 
+    (b.width || 0) - (a.width || 0) || 
+    (b.height || 0) - (a.height || 0)
+  )[0];
 };
 
 const getFormats = async (url) => {
@@ -189,12 +191,6 @@ const getVideoPreview = async (url) => {
           fileSize = calculateFileSize(bestFormat, info.duration);
         }
       }
-      if (['Instagram', 'Facebook'].includes(info.extractor_key)) {
-    const bestFormat = getBestFormatForSizeCalculation(info.formats);
-    return {
-      fileSize: bestFormat ? calculateFileSize(bestFormat, info.duration) : null
-    };
-  }
 
       return {
         id: info.id || videoUrl,
