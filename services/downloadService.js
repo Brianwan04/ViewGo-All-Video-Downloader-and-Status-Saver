@@ -97,19 +97,51 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   return { ...baseOptions, ...extraOptions };
 };
 
-// Helper to calculate file size from bitrate and duration
+// Enhanced file size calculation with better bitrate handling
 const calculateFileSize = (format, duration) => {
+  // Return exact size if available
   if (format.filesize) return format.filesize;
   if (format.filesize_approx) return format.filesize_approx;
   
-  // Calculate from bitrate if available
-  if (format.tbr && duration) {
-    // tbr = total bitrate in kbps, duration in seconds
-    // Convert to bytes: (tbr * 1000 * duration) / 8
-    return (format.tbr * 1000 * duration) / 8;
+  // Calculate from bitrates if available
+  let totalBitrate = format.tbr;
+  
+  if (!totalBitrate) {
+    // Sum video and audio bitrates separately
+    const videoBitrate = format.vbr || format.vbitrate || 0;
+    const audioBitrate = format.abr || format.abitrate || 0;
+    totalBitrate = videoBitrate + audioBitrate;
+  }
+  
+  if (totalBitrate && duration) {
+    // Convert to bytes: (bitrate * 1000 * duration) / 8
+    return (totalBitrate * 1000 * duration) / 8;
   }
   
   return null;
+};
+
+// Enhanced format selection for Facebook/Instagram
+const getBestFormatForSizeCalculation = (formats) => {
+  // Prefer progressive formats with both audio and video
+  const progressive = formats.filter(f => 
+    f.protocol === 'https' && 
+    f.vcodec !== 'none' && 
+    f.acodec !== 'none'
+  );
+  
+  if (progressive.length > 0) {
+    return progressive.sort((a, b) => 
+      (b.width || 0) - (a.width || 0) || 
+      (b.height || 0) - (a.height || 0)
+    )[0];
+  }
+  
+  // Fallback to highest resolution format
+  return formats.sort((a, b) => 
+    (b.width || 0) - (a.width || 0) || 
+    (b.height || 0) - (a.height || 0)
+  )[0];
 };
 
 const getFormats = async (url) => {
@@ -151,13 +183,10 @@ const getVideoPreview = async (url) => {
 
       const info = await ytdl(videoUrl, options);
       
-      // For Facebook/Instagram, get best progressive format size
+      // For all platforms, try to get the best format for size calculation
       let fileSize = info.filesize || info.filesize_approx;
-      if (!fileSize && (isFacebookUrl(videoUrl) || isInstagramUrl(videoUrl))) {
-        const bestFormat = info.formats
-          .filter(f => f.protocol === 'https' && f.vcodec !== 'none')
-          .sort((a, b) => (b.width || 0) - (a.width || 0))[0];
-        
+      if (!fileSize) {
+        const bestFormat = getBestFormatForSizeCalculation(info.formats);
         if (bestFormat) {
           fileSize = calculateFileSize(bestFormat, info.duration);
         }
@@ -182,6 +211,7 @@ const getVideoPreview = async (url) => {
     }
   }
 };
+
 
 const getStreamUrl = async (url, format) => {
   const videoUrl = getVideoUrl(url);
