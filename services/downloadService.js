@@ -42,6 +42,7 @@ const PLATFORM_CONFIGS = {
         skip_web_fallback: true,
       },
     },
+    cookies: process.env.FACEBOOK_COOKIES || '',
   },
   default: {
     userAgent:
@@ -52,6 +53,10 @@ const PLATFORM_CONFIGS = {
 
 const isInstagramUrl = (url) => {
   return /instagram\.com/i.test(url);
+};
+
+const isFacebookUrl = (url) => {
+  return /facebook\.com/i.test(url);
 };
 
 const getVideoUrl = (input) => {
@@ -81,6 +86,13 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
     }
   }
 
+  if (isFacebookUrl(videoUrl)) {
+    if (baseOptions.cookies) {
+      baseOptions.addHeader = baseOptions.addHeader || [];
+      baseOptions.addHeader.push(`cookie: ${baseOptions.cookies}`);
+    }
+  }
+
   if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
     baseOptions.addHeader = [`cookie: ${baseOptions.cookies.trim()}`];
     delete baseOptions.cookies;
@@ -103,15 +115,38 @@ const getFormats = async (url) => {
 
     const info = await ytdl(videoUrl, options);
 
-    return info.formats
-      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none')
-      .map((f) => ({
-        format_id: f.format_id,
-        ext: f.ext,
-        resolution: f.resolution || `${f.height}p` || 'unknown',
-        format_note: f.format_note,
-        filesize: f.filesize || f.filesize_approx || null,
-      }));
+    const resolutions = [480, 720, 1080];
+    const selectedFormats = [];
+
+    resolutions.forEach(height => {
+      const format = info.formats.find(f => f.vcodec !== 'none' && f.acodec !== 'none' && f.height === height);
+      if (format) {
+        selectedFormats.push({
+          format_id: format.format_id,
+          ext: format.ext,
+          resolution: `${height}p`,
+          format_note: `${height}p`,
+          filesize: format.filesize || format.filesize_approx || null,
+        });
+      }
+    });
+
+    // Add one audio format (highest bitrate)
+    const audioFormat = info.formats
+      .filter(f => f.vcodec === 'none' && f.acodec !== 'none')
+      .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
+
+    if (audioFormat) {
+      selectedFormats.push({
+        format_id: audioFormat.format_id,
+        ext: audioFormat.ext,
+        resolution: 'Audio',
+        format_note: 'Audio',
+        filesize: audioFormat.filesize || audioFormat.filesize_approx || null,
+      });
+    }
+
+    return selectedFormats;
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
   }
@@ -301,7 +336,7 @@ const setupProgressStream = (id, res) => {
   const download = downloads.get(id);
   if (download) sendEvent('progress', { progress: download.progress });
 
-  progressEmitter.on('progress', (progress) => sendEvent('progress', { progress }));
+  progressEmitter.on('progress', (progress) => sendEvent('progress', { progress });
   progressEmitter.on('completed', (filePath) => {
     sendEvent('completed', { downloadUrl: `/downloads/${path.basename(filePath)}` });
   });
