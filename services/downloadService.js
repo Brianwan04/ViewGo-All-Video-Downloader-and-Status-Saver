@@ -42,7 +42,6 @@ const PLATFORM_CONFIGS = {
         skip_web_fallback: true,
       },
     },
-    cookies: process.env.FACEBOOK_COOKIES || '',
   },
   default: {
     userAgent:
@@ -56,7 +55,7 @@ const isInstagramUrl = (url) => {
 };
 
 const isFacebookUrl = (url) => {
-  return /facebook\.com/i.test(url);
+  return /facebook\.com|fb\.watch/i.test(url);
 };
 
 const getVideoUrl = (input) => {
@@ -86,13 +85,6 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
     }
   }
 
-  if (isFacebookUrl(videoUrl)) {
-    if (baseOptions.cookies) {
-      baseOptions.addHeader = baseOptions.addHeader || [];
-      baseOptions.addHeader.push(`cookie: ${baseOptions.cookies}`);
-    }
-  }
-
   if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
     baseOptions.addHeader = [`cookie: ${baseOptions.cookies.trim()}`];
     delete baseOptions.cookies;
@@ -105,6 +97,21 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   return { ...baseOptions, ...extraOptions };
 };
 
+// Helper to calculate file size from bitrate and duration
+const calculateFileSize = (format, duration) => {
+  if (format.filesize) return format.filesize;
+  if (format.filesize_approx) return format.filesize_approx;
+  
+  // Calculate from bitrate if available
+  if (format.tbr && duration) {
+    // tbr = total bitrate in kbps, duration in seconds
+    // Convert to bytes: (tbr * 1000 * duration) / 8
+    return (format.tbr * 1000 * duration) / 8;
+  }
+  
+  return null;
+};
+
 const getFormats = async (url) => {
   try {
     const videoUrl = getVideoUrl(url);
@@ -114,39 +121,17 @@ const getFormats = async (url) => {
     });
 
     const info = await ytdl(videoUrl, options);
+    const duration = info.duration;
 
-    const resolutions = [480, 720, 1080];
-    const selectedFormats = [];
-
-    resolutions.forEach(height => {
-      const format = info.formats.find(f => f.vcodec !== 'none' && f.acodec !== 'none' && f.height === height);
-      if (format) {
-        selectedFormats.push({
-          format_id: format.format_id,
-          ext: format.ext,
-          resolution: `${height}p`,
-          format_note: `${height}p`,
-          filesize: format.filesize || format.filesize_approx || null,
-        });
-      }
-    });
-
-    // Add one audio format (highest bitrate)
-    const audioFormat = info.formats
-      .filter(f => f.vcodec === 'none' && f.acodec !== 'none')
-      .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
-
-    if (audioFormat) {
-      selectedFormats.push({
-        format_id: audioFormat.format_id,
-        ext: audioFormat.ext,
-        resolution: 'Audio',
-        format_note: 'Audio',
-        filesize: audioFormat.filesize || audioFormat.filesize_approx || null,
-      });
-    }
-
-    return selectedFormats;
+    return info.formats
+      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none')
+      .map((f) => ({
+        format_id: f.format_id,
+        ext: f.ext,
+        resolution: f.resolution || `${f.height}p` || 'unknown',
+        format_note: f.format_note,
+        filesize: calculateFileSize(f, duration),
+      }));
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
   }
@@ -165,6 +150,18 @@ const getVideoPreview = async (url) => {
       });
 
       const info = await ytdl(videoUrl, options);
+      
+      // For Facebook/Instagram, get best progressive format size
+      let fileSize = info.filesize || info.filesize_approx;
+      if (!fileSize && (isFacebookUrl(videoUrl) || isInstagramUrl(videoUrl))) {
+        const bestFormat = info.formats
+          .filter(f => f.protocol === 'https' && f.vcodec !== 'none')
+          .sort((a, b) => (b.width || 0) - (a.width || 0))[0];
+        
+        if (bestFormat) {
+          fileSize = calculateFileSize(bestFormat, info.duration);
+        }
+      }
 
       return {
         id: info.id || videoUrl,
@@ -174,7 +171,7 @@ const getVideoPreview = async (url) => {
         platform: info.extractor_key,
         uploader: info.uploader,
         view_count: info.view_count,
-        fileSize: info.filesize || info.filesize_approx || null
+        fileSize: fileSize || null
       };
     } catch (error) {
       retries++;
@@ -336,7 +333,7 @@ const setupProgressStream = (id, res) => {
   const download = downloads.get(id);
   if (download) sendEvent('progress', { progress: download.progress });
 
-  progressEmitter.on('progress', (progress) => sendEvent('progress', { progress });
+  progressEmitter.on('progress', (progress) => sendEvent('progress', { progress }));
   progressEmitter.on('completed', (filePath) => {
     sendEvent('completed', { downloadUrl: `/downloads/${path.basename(filePath)}` });
   });
