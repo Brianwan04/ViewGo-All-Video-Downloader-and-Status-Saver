@@ -64,16 +64,8 @@ const getVideoUrl = (input) => {
 
 const buildYtdlOptions = (input, extraOptions = {}) => {
   const config = typeof input === 'object' ? input.config || {} : {};
-  let platform = typeof input === 'object' ? input.platform || 'default' : 'default';
+  const platform = typeof input === 'object' ? input.platform || 'default' : 'default';
   const videoUrl = getVideoUrl(input);
-
-  // autodetect platform from URL when caller passed a string
-  if (typeof input === 'string') {
-    if (isInstagramUrl(videoUrl)) platform = 'instagram';
-    else if (isFacebookUrl(videoUrl)) platform = 'facebook';
-    else if (/youtube\.com|youtu\.be/i.test(videoUrl)) platform = 'youtube';
-    else platform = 'default';
-  }
 
   const baseOptions = {
     noCheckCertificates: true,
@@ -83,7 +75,6 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
     ...config,
   };
 
-  // existing cookie/proxy handling unchanged...
   if (isInstagramUrl(videoUrl)) {
     if (process.env.INSTAGRAM_COOKIES) {
       baseOptions.addHeader = baseOptions.addHeader || [];
@@ -106,44 +97,49 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   return { ...baseOptions, ...extraOptions };
 };
 
-// --- choose best candidates; allow pairing audio+video if no progressive ---
-const getBestFormatForSizeCalculation = (formats, duration) => {
-  if (!Array.isArray(formats) || formats.length === 0) return null;
-
-  // 1) Prefer a progressive (audio+video)
-  const progressive = formats.filter(f => f.vcodec && f.vcodec !== 'none' && f.acodec && f.acodec !== 'none');
-  if (progressive.length > 0) {
-    const byFilesize = progressive.filter(f => f.filesize || f.filesize_approx)
-      .sort((a, b) => (b.filesize || b.filesize_approx || 0) - (a.filesize || a.filesize_approx || 0));
-    const best = byFilesize.length ? byFilesize[0] : progressive.sort((a, b) => (b.width || 0) - (a.width || 0) || (b.height || 0) - (a.height || 0))[0];
-    best.download_format = best.format_id;
-    return best;
+const getBestFormatForSizeCalculation = (formats) => {
+  // Prefer formats with both video and audio
+  const combined = formats.filter(f => 
+    f.vcodec !== 'none' && 
+    f.acodec !== 'none' &&
+    f.filesize
+  );
+  
+  if (combined.length > 0) {
+    return combined.sort((a, b) => 
+      (b.filesize || 0) - (a.filesize || 0)
+    )[0];
   }
 
-  // 2) Pair video-only + audio-only
-  const videoOnly = formats.filter(f => f.vcodec && f.vcodec !== 'none' && (!f.acodec || f.acodec === 'none'));
-  const audioOnly = formats.filter(f => (!f.vcodec || f.vcodec === 'none') && f.acodec && f.acodec !== 'none');
+  // Fallback to largest video format
+  return formats
+    .filter(f => f.vcodec !== 'none')
+    .sort((a, b) => 
+      (b.width || 0) - (a.width || 0) || 
+      (b.height || 0) - (a.height || 0)
+    )[0];
+};
 
-  const bestVideo = videoOnly.sort((a, b) => (b.width || 0) - (a.width || 0) || (b.height || 0) - (a.height || 0))[0];
-  const bestAudio = audioOnly.sort((a, b) => (b.abr || b.abitrate || 0) - (a.abr || a.abitrate || 0))[0];
+const calculateFileSize = (format, duration) => {
+  // 1. Return exact size if available
+  if (format.filesize) return format.filesize;
+  if (format.filesize_approx) return format.filesize_approx;
 
-  if (bestVideo || bestAudio) {
-    const synthetic = {
-      format_id: `${bestVideo?.format_id || 'videoonly'}+${bestAudio?.format_id || 'audioonly'}`,
-      ext: (bestVideo && bestVideo.ext) || (bestAudio && bestAudio.ext) || 'mp4',
-      vbr: bestVideo ? (bestVideo.tbr || bestVideo.vbr || bestVideo.vbitrate || 0) : 0,
-      abr: bestAudio ? (bestAudio.abr || bestAudio.abitrate || 0) : 0,
-      tbr: (bestVideo ? (bestVideo.tbr || bestVideo.vbr || 0) : 0) + (bestAudio ? (bestAudio.abr || bestAudio.abitrate || 0) : 0),
-      paired: { video: bestVideo, audio: bestAudio },
-      download_format: `${bestVideo?.format_id || ''}+${bestAudio?.format_id || ''}`
-    };
-    return synthetic;
+  // 2. Calculate from video/audio bitrates
+  const videoBitrate = format.vbr || format.vbitrate || 0;
+  const audioBitrate = format.abr || format.abitrate || 0;
+  const totalBitrate = videoBitrate + audioBitrate;
+
+  if (totalBitrate && duration) {
+    return (totalBitrate * 1000 * duration) / 8;
   }
 
-  // 3) fallback - top by filesize/tbr
-  const fallback = formats.sort((a, b) => (b.filesize || b.filesize_approx || b.tbr || 0) - (a.filesize || a.filesize_approx || a.tbr || 0))[0];
-  if (fallback) fallback.download_format = fallback.format_id;
-  return fallback;
+  // 3. Facebook/Instagram specific fallback
+  if (format.tbr) {
+    return (format.tbr * 1000 * (duration || 60)) / 8;
+  }
+
+  return null;
 };
 
 const getFormats = async (url) => {
@@ -155,47 +151,21 @@ const getFormats = async (url) => {
     });
 
     const info = await ytdl(videoUrl, options);
-    const duration = info.duration || 0;
-    const formats = info.formats || [];
+    const duration = info.duration;
 
-    const results = formats.map((f) => {
-      const size = f.filesize || f.filesize_approx || calculateFileSize(f, duration);
-      return {
+    return info.formats
+      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none')
+      .map((f) => ({
         format_id: f.format_id,
         ext: f.ext,
-        resolution: f.format_note || (f.height ? `${f.height}p` : 'unknown'),
+        resolution: f.resolution || `${f.height}p` || 'unknown',
         format_note: f.format_note,
-        hasAudio: !(f.acodec === 'none' || !f.acodec),
-        hasVideo: !(f.vcodec === 'none' || !f.vcodec),
-        filesize: size || null,
-        raw: f,
-        download_format: f.format_id, // for progressive formats this is the correct choice
-      };
-    });
-
-    // If no per-format filesize available, pair best candidates and return a single synthetic result with download_format
-    const anyWithFile = results.find(r => r.filesize);
-    if (!anyWithFile) {
-      const best = getBestFormatForSizeCalculation(formats, duration);
-      const size = calculateFileSize(best, duration);
-      return [{
-        format_id: best.format_id,
-        ext: best.ext,
-        resolution: best.height ? `${best.height}p` : 'unknown',
-        format_note: 'paired-estimate',
-        filesize: size || null,
-        raw: best,
-        download_format: best.download_format || best.format_id
-      }];
-    }
-
-    return results;
+        filesize: calculateFileSize(f, duration),
+      }));
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
   }
 };
-
-
 
 const getVideoPreview = async (url) => {
   const maxRetries = 3;
@@ -219,6 +189,12 @@ const getVideoPreview = async (url) => {
           fileSize = calculateFileSize(bestFormat, info.duration);
         }
       }
+      if (['Instagram', 'Facebook'].includes(info.extractor_key)) {
+    const bestFormat = getBestFormatForSizeCalculation(info.formats);
+    return {
+      fileSize: bestFormat ? calculateFileSize(bestFormat, info.duration) : null
+    };
+  }
 
       return {
         id: info.id || videoUrl,
@@ -444,14 +420,6 @@ const streamDownload = async (url, format, res) => {
     res.setHeader('Content-Length', fileSize);
   }
 */
-    let chosenFormat = format || 'best';
-if (!chosenFormat || chosenFormat === 'best') {
-  // try to prefer progressive, else bestvideo+bestaudio
-  const info = await ytdl(videoUrl, { ...options, dumpSingleJson: true });
-  const hasProgressive = info.formats.some(f => f.vcodec !== 'none' && f.acodec !== 'none' && (f.filesize || f.filesize_approx));
-  chosenFormat = hasProgressive ? 'best' : 'bestvideo+bestaudio';
-}
-
 
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
