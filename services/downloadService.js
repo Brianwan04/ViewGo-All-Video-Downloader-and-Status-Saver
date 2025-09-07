@@ -30,16 +30,25 @@ const PLATFORM_CONFIGS = {
     userAgent:
       'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
     referer: 'https://www.instagram.com/',
-    forceIpv4: true,
-    proxy: process.env.INSTAGRAM_PROXY || '',
+    forceIpv4: false, // Adjusted for better compatibility
   },
   facebook: {
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
     extractorArgs: {
       facebook: {
-        skip_auth: true,
+        skip_auth: false,
         skip_web_fallback: true,
+      },
+    },
+  },
+  soundcloud: {
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    referer: 'https://soundcloud.com/',
+    extractorArgs: {
+      soundcloud: {
+        format: 'mp3', // Prefer MP3 for audio
       },
     },
   },
@@ -50,21 +59,15 @@ const PLATFORM_CONFIGS = {
   },
 };
 
-const isInstagramUrl = (url) => {
-  return /instagram\.com/i.test(url);
-};
-
-const isFacebookUrl = (url) => {
-  return /facebook\.com|fb\.watch/i.test(url);
-};
-
-const getVideoUrl = (input) => {
-  return typeof input === 'string' ? input : input.url;
-};
+// URL detection functions
+const isInstagramUrl = (url) => /instagram\.com/i.test(url);
+const isFacebookUrl = (url) => /facebook\.com|fb\.watch/i.test(url);
+const isSoundCloudUrl = (url) => /soundcloud\.com/i.test(url);
+const getVideoUrl = (input) => (typeof input === 'string' ? input : input.url);
 
 const buildYtdlOptions = (input, extraOptions = {}) => {
   const config = typeof input === 'object' ? input.config || {} : {};
-  const platform = typeof input === 'object' ? input.platform || 'default' : 'default';
+  const platform = typeof input === 'object' ? input.platform || (isSoundCloudUrl(getVideoUrl(input)) ? 'soundcloud' : 'default') : 'default';
   const videoUrl = getVideoUrl(input);
 
   const baseOptions = {
@@ -97,21 +100,28 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   return { ...baseOptions, ...extraOptions };
 };
 
-// Updated calculateFileSize with better bitrate handling
+// Updated calculateFileSize for audio support
 const calculateFileSize = (format, duration) => {
   if (format.filesize) return format.filesize;
   if (format.filesize_approx) return format.filesize_approx;
 
-  // Sum video and audio bitrates
-  let totalBitrate = format.tbr || (format.vbr || format.vbitrate || 0) + (format.abr || format.abitrate || 0);
+  let totalBitrate = format.tbr || (format.abr || format.abitrate || 0);
+  if (format.vcodec !== 'none') {
+    totalBitrate += format.vbr || format.vbitrate || 0;
+  }
 
   if (totalBitrate && duration) {
-    // Convert to bytes: (bitrate * 1000 * duration) / 8
     return (totalBitrate * 1000 * duration) / 8;
   }
 
-  // Fallback for missing bitrates based on resolution
-  const height = format.height || 720; // Default to 720p
+  // Fallback for audio-only (e.g., SoundCloud)
+  if (format.vcodec === 'none' && duration) {
+    const defaultAudioBitrate = 128; // Default to 128kbps for audio
+    return (defaultAudioBitrate * 1000 * duration) / 8;
+  }
+
+  // Fallback for video based on resolution
+  const height = format.height || 720;
   const estimatedBitrate = estimateBitrateByRes(height);
   if (estimatedBitrate && duration) {
     return (estimatedBitrate * 1000 * duration) / 8;
@@ -120,17 +130,14 @@ const calculateFileSize = (format, duration) => {
   return null;
 };
 
-// New function to estimate bitrate based on resolution
 const estimateBitrateByRes = (height) => {
-  if (height >= 1080) return 5000; // 5Mbps for 1080p+
-  if (height >= 720) return 2500; // 2.5Mbps for 720p
-  if (height >= 480) return 1000; // 1Mbps for 480p
-  return 500; // 500kbps for lower resolutions
+  if (height >= 1080) return 5000;
+  if (height >= 720) return 2500;
+  if (height >= 480) return 1000;
+  return 500;
 };
 
-// New function to estimate size for adaptive (DASH) formats
 const getEstimatedSizeForAdaptive = (formats, duration) => {
-  // Find best video and audio formats
   const bestVideo = formats
     .filter((f) => f.vcodec !== 'none' && f.acodec === 'none')
     .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
@@ -142,10 +149,9 @@ const getEstimatedSizeForAdaptive = (formats, duration) => {
   const audioSize = bestAudio ? calculateFileSize(bestAudio, duration) : null;
 
   if (videoSize && audioSize) {
-    return videoSize + audioSize; // Sum for merged size
+    return videoSize + audioSize;
   }
 
-  // Fallback to estimate based on duration and default bitrate
   if (duration) {
     const defaultBitrate = estimateBitrateByRes(bestVideo?.height || 720);
     return (defaultBitrate * 1000 * duration) / 8;
@@ -154,7 +160,6 @@ const getEstimatedSizeForAdaptive = (formats, duration) => {
   return null;
 };
 
-// Existing getBestFormatForSizeCalculation (unchanged)
 const getBestFormatForSizeCalculation = (formats) => {
   const progressive = formats.filter(
     (f) => f.protocol === 'https' && f.vcodec !== 'none' && f.acodec !== 'none'
@@ -182,31 +187,31 @@ const getFormats = async (url) => {
     const info = await ytdl(videoUrl, options);
     const duration = info.duration;
 
-    return info.formats
-      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none') // Progressive formats
-      .map((f) => {
-        let filesize = calculateFileSize(f, duration);
+    let formats = isSoundCloudUrl(videoUrl)
+      ? info.formats.filter((f) => f.acodec !== 'none' && f.vcodec === 'none') // Audio-only for SoundCloud
+      : info.formats.filter((f) => f.vcodec !== 'none' && f.acodec !== 'none'); // Progressive for others
 
-        // Fallback for adaptive platforms (e.g., Facebook, Instagram)
-        if (!filesize && (isFacebookUrl(videoUrl) || isInstagramUrl(videoUrl))) {
-          filesize = getEstimatedSizeForAdaptive(info.formats, duration);
-        }
+    return formats.map((f) => {
+      let filesize = calculateFileSize(f, duration);
 
-        // Final fallback: estimate based on resolution and duration
-        if (!filesize && duration) {
-          const height = f.height || 720; // Default to 720p
-          const estimatedBitrate = estimateBitrateByRes(height);
-          filesize = (estimatedBitrate * 1000 * duration) / 8;
-        }
+      if (!filesize && (isFacebookUrl(videoUrl) || isInstagramUrl(videoUrl))) {
+        filesize = getEstimatedSizeForAdaptive(info.formats, duration);
+      }
 
-        return {
-          format_id: f.format_id,
-          ext: f.ext,
-          resolution: f.resolution || `${f.height}p` || 'unknown',
-          format_note: f.format_note,
-          filesize: filesize || null, // Rarely null now
-        };
-      });
+      if (!filesize && duration) {
+        const height = f.height || 720;
+        const estimatedBitrate = isSoundCloudUrl(videoUrl) ? 128 : estimateBitrateByRes(height);
+        filesize = (estimatedBitrate * 1000 * duration) / 8;
+      }
+
+      return {
+        format_id: f.format_id,
+        ext: f.ext || (isSoundCloudUrl(videoUrl) ? 'mp3' : 'mp4'),
+        resolution: isSoundCloudUrl(videoUrl) ? f.abr ? `${f.abr}kbps` : 'audio' : f.resolution || `${f.height}p` || 'unknown',
+        format_note: f.format_note || (isSoundCloudUrl(videoUrl) ? 'audio' : 'video'),
+        filesize: filesize || null,
+      };
+    });
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
   }
@@ -225,38 +230,35 @@ const getVideoPreview = async (url) => {
       });
 
       const info = await ytdl(videoUrl, options);
-
-      // Try direct filesize
       let fileSize = info.filesize || info.filesize_approx;
 
-      // Try progressive format
       if (!fileSize) {
-        const bestFormat = getBestFormatForSizeCalculation(info.formats);
+        const bestFormat = isSoundCloudUrl(videoUrl)
+          ? info.formats.filter((f) => f.acodec !== 'none' && f.vcodec === 'none').sort((a, b) => (b.abr || 0) - (a.abr || 0))[0]
+          : getBestFormatForSizeCalculation(info.formats);
         if (bestFormat) {
           fileSize = calculateFileSize(bestFormat, info.duration);
         }
       }
 
-      // Try adaptive (DASH) for FB/IG
       if (!fileSize && (isFacebookUrl(videoUrl) || isInstagramUrl(videoUrl))) {
         fileSize = getEstimatedSizeForAdaptive(info.formats, info.duration);
       }
 
-      // Final fallback: estimate based on duration
       if (!fileSize && info.duration) {
-        const defaultBitrate = estimateBitrateByRes(720); // Default 720p
+        const defaultBitrate = isSoundCloudUrl(videoUrl) ? 128 : estimateBitrateByRes(720);
         fileSize = (defaultBitrate * 1000 * info.duration) / 8;
       }
 
       return {
         id: info.id || videoUrl,
         title: info.title || 'Untitled',
-        thumbnail: info.thumbnail,
+        thumbnail: info.thumbnail || null,
         duration: info.duration,
         platform: info.extractor_key,
         uploader: info.uploader || 'Unknown',
         view_count: info.view_count || null,
-        fileSize: fileSize || null, // Return null only if all methods fail
+        fileSize: fileSize || null,
       };
     } catch (error) {
       retries++;
@@ -271,7 +273,7 @@ const getVideoPreview = async (url) => {
 const getStreamUrl = async (url, format) => {
   const videoUrl = getVideoUrl(url);
   const options = buildYtdlOptions(url, {
-    format: format || 'best',
+    format: format || (isSoundCloudUrl(videoUrl) ? 'bestaudio[ext=mp3]' : 'best'),
     dumpSingleJson: true,
   });
 
@@ -305,14 +307,14 @@ const getStreamUrl = async (url, format) => {
     }
   }
 
-  const progressive = info.formats
-    .filter((f) => f.protocol === 'https' && f.vcodec !== 'none' && f.acodec !== 'none')
-    .sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
+  const preferred = isSoundCloudUrl(videoUrl)
+    ? info.formats.filter((f) => f.acodec !== 'none' && f.vcodec === 'none').sort((a, b) => (b.abr || 0) - (a.abr || 0))[0]
+    : info.formats.filter((f) => f.protocol === 'https' && f.vcodec !== 'none' && f.acodec !== 'none').sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
 
-  if (progressive?.url) {
+  if (preferred?.url) {
     return {
-      url: progressive.url,
-      format: progressive.format_id,
+      url: preferred.url,
+      format: preferred.format_id,
       duration: info.duration,
       title: info.title,
     };
@@ -344,13 +346,22 @@ const startDownload = async (url, format) => {
       const options = buildYtdlOptions(url);
       const args = [videoUrl, '-o', output];
 
-      if (format) args.push('-f', format);
+      if (format) {
+        args.push('-f', format);
+      } else if (isSoundCloudUrl(videoUrl)) {
+        args.push('-f', 'bestaudio[ext=mp3]');
+      }
+
       if (options.cookies) args.push('--cookies', options.cookies);
       if (options.proxy) args.push('--proxy', options.proxy);
       if (options.userAgent) args.push('--user-agent', options.userAgent);
       if (options.referer) args.push('--referer', options.referer);
       if (options.addHeader) {
         options.addHeader.forEach((hdr) => args.push('--add-header', hdr));
+      }
+
+      if (isSoundCloudUrl(videoUrl)) {
+        args.push('--merge-output-format', 'mp3');
       }
 
       const ytdlProcess = ytdl.exec(args);
@@ -458,33 +469,32 @@ const streamDownload = async (url, format, res) => {
   try {
     const options = buildYtdlOptions(url, {
       dumpSingleJson: true,
-      format: format || 'best',
+      format: format || (isSoundCloudUrl(videoUrl) ? 'bestaudio[ext=mp3]' : 'best'),
     });
 
     const info = await ytdl(videoUrl, options);
-    const safeTitle = (info.title || 'video').replace(/[^\w\s]/gi, '');
-    const extension = 'mp4';
+    const safeTitle = (info.title || 'audio').replace(/[^\w\s]/gi, '');
+    const extension = isSoundCloudUrl(videoUrl) ? 'mp3' : 'mp4';
 
     const fileSize = info.filesize || info.filesize_approx;
 
-  /*if (fileSize) {
-    res.setHeader('Content-Length', fileSize);
-  }
-*/
+    /*if (fileSize) {
+      res.setHeader('Content-Length', fileSize);
+    }*/
 
-    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Type', isSoundCloudUrl(videoUrl) ? 'audio/mpeg' : 'video/mp4');
     res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
 
     const args = [
       videoUrl,
       '-f',
-      format || 'best',
+      format || (isSoundCloudUrl(videoUrl) ? 'bestaudio[ext=mp3]' : 'best'),
       '-o',
       '-',
       '--no-part',
       '--no-check-certificates',
       '--merge-output-format',
-      'mp4',
+      isSoundCloudUrl(videoUrl) ? 'mp3' : 'mp4',
     ];
 
     if (options.addHeader) {
@@ -494,7 +504,7 @@ const streamDownload = async (url, format, res) => {
     if (options.proxy) args.push('--proxy', options.proxy);
     if (options.referer) args.push('--referer', options.referer);
 
-    if (isInstagramUrl(url) && process.env.INSTAGRAM_COOKIES) {
+    if (isInstagramUrl(videoUrl) && process.env.INSTAGRAM_COOKIES) {
       args.push('--add-header', `cookie: ${process.env.INSTAGRAM_COOKIES}`);
     }
 
@@ -529,10 +539,9 @@ const streamDownload = async (url, format, res) => {
       }
     });
   } catch (err) {
-    if (err.message.includes('login required') || 
-        err.message.includes('rate-limit reached')) {
-      res.status(401).json({ 
-        error: 'Instagram authentication required'
+    if (err.message.includes('login required') || err.message.includes('rate-limit reached')) {
+      res.status(401).json({
+        error: isSoundCloudUrl(videoUrl) ? 'SoundCloud authentication may be required' : 'Instagram authentication required',
       });
     } else {
       console.error('Streaming error:', err);
