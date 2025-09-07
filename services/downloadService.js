@@ -97,50 +97,77 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   return { ...baseOptions, ...extraOptions };
 };
 
-// Enhanced file size calculation with better bitrate handling
+// Updated calculateFileSize with better bitrate handling
 const calculateFileSize = (format, duration) => {
-  // Return exact size if available
   if (format.filesize) return format.filesize;
   if (format.filesize_approx) return format.filesize_approx;
-  
-  // Calculate from bitrates if available
-  let totalBitrate = format.tbr;
-  
-  if (!totalBitrate) {
-    // Sum video and audio bitrates separately
-    const videoBitrate = format.vbr || format.vbitrate || 0;
-    const audioBitrate = format.abr || format.abitrate || 0;
-    totalBitrate = videoBitrate + audioBitrate;
-  }
-  
+
+  // Sum video and audio bitrates
+  let totalBitrate = format.tbr || (format.vbr || format.vbitrate || 0) + (format.abr || format.abitrate || 0);
+
   if (totalBitrate && duration) {
     // Convert to bytes: (bitrate * 1000 * duration) / 8
     return (totalBitrate * 1000 * duration) / 8;
   }
-  
+
+  // Fallback for missing bitrates based on resolution
+  const height = format.height || 720; // Default to 720p
+  const estimatedBitrate = estimateBitrateByRes(height);
+  if (estimatedBitrate && duration) {
+    return (estimatedBitrate * 1000 * duration) / 8;
+  }
+
   return null;
 };
 
-// Enhanced format selection for Facebook/Instagram
+// New function to estimate bitrate based on resolution
+const estimateBitrateByRes = (height) => {
+  if (height >= 1080) return 5000; // 5Mbps for 1080p+
+  if (height >= 720) return 2500; // 2.5Mbps for 720p
+  if (height >= 480) return 1000; // 1Mbps for 480p
+  return 500; // 500kbps for lower resolutions
+};
+
+// New function to estimate size for adaptive (DASH) formats
+const getEstimatedSizeForAdaptive = (formats, duration) => {
+  // Find best video and audio formats
+  const bestVideo = formats
+    .filter((f) => f.vcodec !== 'none' && f.acodec === 'none')
+    .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+  const bestAudio = formats
+    .filter((f) => f.acodec !== 'none' && f.vcodec === 'none')
+    .sort((a, b) => (b.abr || 0) - (a.abr || 0))[0];
+
+  const videoSize = bestVideo ? calculateFileSize(bestVideo, duration) : null;
+  const audioSize = bestAudio ? calculateFileSize(bestAudio, duration) : null;
+
+  if (videoSize && audioSize) {
+    return videoSize + audioSize; // Sum for merged size
+  }
+
+  // Fallback to estimate based on duration and default bitrate
+  if (duration) {
+    const defaultBitrate = estimateBitrateByRes(bestVideo?.height || 720);
+    return (defaultBitrate * 1000 * duration) / 8;
+  }
+
+  return null;
+};
+
+// Existing getBestFormatForSizeCalculation (unchanged)
 const getBestFormatForSizeCalculation = (formats) => {
-  // Prefer progressive formats with both audio and video
-  const progressive = formats.filter(f => 
-    f.protocol === 'https' && 
-    f.vcodec !== 'none' && 
-    f.acodec !== 'none'
+  const progressive = formats.filter(
+    (f) => f.protocol === 'https' && f.vcodec !== 'none' && f.acodec !== 'none'
   );
-  
+
   if (progressive.length > 0) {
-    return progressive.sort((a, b) => 
-      (b.width || 0) - (a.width || 0) || 
-      (b.height || 0) - (a.height || 0)
+    return progressive.sort(
+      (a, b) => (b.width || 0) - (a.width || 0) || (b.height || 0) - (a.height || 0)
     )[0];
   }
-  
-  // Fallback to highest resolution format
-  return formats.sort((a, b) => 
-    (b.width || 0) - (a.width || 0) || 
-    (b.height || 0) - (a.height || 0)
+
+  return formats.sort(
+    (a, b) => (b.width || 0) - (a.width || 0) || (b.height || 0) - (a.height || 0)
   )[0];
 };
 
@@ -156,14 +183,30 @@ const getFormats = async (url) => {
     const duration = info.duration;
 
     return info.formats
-      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none')
-      .map((f) => ({
-        format_id: f.format_id,
-        ext: f.ext,
-        resolution: f.resolution || `${f.height}p` || 'unknown',
-        format_note: f.format_note,
-        filesize: calculateFileSize(f, duration),
-      }));
+      .filter((f) => f.vcodec !== 'none' && f.acodec !== 'none') // Progressive formats
+      .map((f) => {
+        let filesize = calculateFileSize(f, duration);
+
+        // Fallback for adaptive platforms (e.g., Facebook, Instagram)
+        if (!filesize && (isFacebookUrl(videoUrl) || isInstagramUrl(videoUrl))) {
+          filesize = getEstimatedSizeForAdaptive(info.formats, duration);
+        }
+
+        // Final fallback: estimate based on resolution and duration
+        if (!filesize && duration) {
+          const height = f.height || 720; // Default to 720p
+          const estimatedBitrate = estimateBitrateByRes(height);
+          filesize = (estimatedBitrate * 1000 * duration) / 8;
+        }
+
+        return {
+          format_id: f.format_id,
+          ext: f.ext,
+          resolution: f.resolution || `${f.height}p` || 'unknown',
+          format_note: f.format_note,
+          filesize: filesize || null, // Rarely null now
+        };
+      });
   } catch (error) {
     throw new Error('Failed to get formats: ' + error.message);
   }
@@ -182,9 +225,11 @@ const getVideoPreview = async (url) => {
       });
 
       const info = await ytdl(videoUrl, options);
-      
-      // For all platforms, try to get the best format for size calculation
+
+      // Try direct filesize
       let fileSize = info.filesize || info.filesize_approx;
+
+      // Try progressive format
       if (!fileSize) {
         const bestFormat = getBestFormatForSizeCalculation(info.formats);
         if (bestFormat) {
@@ -192,15 +237,26 @@ const getVideoPreview = async (url) => {
         }
       }
 
+      // Try adaptive (DASH) for FB/IG
+      if (!fileSize && (isFacebookUrl(videoUrl) || isInstagramUrl(videoUrl))) {
+        fileSize = getEstimatedSizeForAdaptive(info.formats, info.duration);
+      }
+
+      // Final fallback: estimate based on duration
+      if (!fileSize && info.duration) {
+        const defaultBitrate = estimateBitrateByRes(720); // Default 720p
+        fileSize = (defaultBitrate * 1000 * info.duration) / 8;
+      }
+
       return {
         id: info.id || videoUrl,
-        title: info.title,
+        title: info.title || 'Untitled',
         thumbnail: info.thumbnail,
         duration: info.duration,
         platform: info.extractor_key,
-        uploader: info.uploader,
-        view_count: info.view_count,
-        fileSize: fileSize || null
+        uploader: info.uploader || 'Unknown',
+        view_count: info.view_count || null,
+        fileSize: fileSize || null, // Return null only if all methods fail
       };
     } catch (error) {
       retries++;
@@ -211,7 +267,6 @@ const getVideoPreview = async (url) => {
     }
   }
 };
-
 
 const getStreamUrl = async (url, format) => {
   const videoUrl = getVideoUrl(url);
