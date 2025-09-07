@@ -493,8 +493,8 @@ const streamDownload = async (url, format, res) => {
       '-',
       '--no-part',
       '--no-check-certificates',
-      '--merge-output-format',
-      isSoundCloudUrl(videoUrl) ? 'mp3' : 'mp4',
+     // '--merge-output-format',
+     // isSoundCloudUrl(videoUrl) ? 'mp3' : 'mp4',
     ];
 
     if (options.addHeader) {
