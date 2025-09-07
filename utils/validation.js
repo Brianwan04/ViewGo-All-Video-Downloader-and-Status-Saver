@@ -82,8 +82,8 @@ const validateUrl = (inputUrl) => {
 
   // Validate supported platforms
   const supportedPlatforms = [
-    'youtube.com',
-    'youtu.be',
+   // 'youtube.com',
+    //'youtu.be',
     'tiktok.com',
     'vm.tiktok.com',
     'tiktoklite.com',
@@ -93,7 +93,7 @@ const validateUrl = (inputUrl) => {
     'reddit.com',
     'v.redd.it',
     'vimeo.com',
-    'dailymotion.com',
+    //'dailymotion.com',
     'twitter.com',
     'x.com',
     'linkedin.com',
@@ -101,16 +101,16 @@ const validateUrl = (inputUrl) => {
     'soundcloud.com',
     'twitch.tv',
     'rumble.com',
-    'bitchute.com',
-    'bilibili.com',
+    //'bitchute.com',
+    //'bilibili.com',
     'snapchat.com',
-    'threads.net',
-    'threads.com',
-    'likee.video',
+    //'threads.net',
+    //'threads.com',
+    //'likee.video',
     'triller.co',
     '9gag.com',
-    'dai.ly',
-    'dai.ly.com'
+    //'dai.ly',
+    //'dai.ly.com'
   ];
 
   let hostname;
