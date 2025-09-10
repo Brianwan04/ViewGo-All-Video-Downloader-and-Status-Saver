@@ -466,25 +466,40 @@ const scheduleFileDeletion = (filePath) => {
 const streamDownload = async (url, format, res) => {
   const videoUrl = getVideoUrl(url);
 
+  // Generate a stream id so we can store metadata / status server-side
+  const streamId = uuidv4();
+
+  // create a downloads entry so metadata can be attached later
+  downloads.set(streamId, {
+    id: streamId,
+    url: videoUrl,
+    format,
+    status: 'streaming',
+    progress: 0,
+    filePath: null,
+    error: null,
+    metadata: null, // will be filled asynchronously
+  });
+
   try {
+    // Build minimal options for the streaming child (do not dumpSingleJson here)
     const options = buildYtdlOptions(url, {
-      dumpSingleJson: true,
+      // do not request dumpSingleJson here — that's what caused the delay
       format: format || (isSoundCloudUrl(videoUrl) ? 'bestaudio[ext=mp3]' : 'best'),
     });
 
-    const info = await ytdl(videoUrl, options);
-    const safeTitle = (info.title || 'audio').replace(/[^\w\s]/gi, '');
+    // Prepare a safe fallback filename (we don't wait for metadata to set a pretty name)
+    const fallbackName = `download-${streamId}`; // safe and unique
     const extension = isSoundCloudUrl(videoUrl) ? 'mp3' : 'mp4';
 
-    const fileSize = info.filesize || info.filesize_approx;
-
-    /*if (fileSize) {
-      res.setHeader('Content-Length', fileSize);
-    }*/
-
+    // Send headers early so frontends and proxies see activity
     res.setHeader('Content-Type', isSoundCloudUrl(videoUrl) ? 'audio/mpeg' : 'video/mp4');
-    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}.${extension}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${fallbackName}.${extension}"`);
+    res.setHeader('X-Stream-Id', streamId); // optional header for later lookup
+    if (typeof res.setTimeout === 'function') res.setTimeout(0); // disable default timeout if possible
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
 
+    // Build args for spawning yt-dlp to stream to stdout
     const args = [
       videoUrl,
       '-f',
@@ -493,8 +508,7 @@ const streamDownload = async (url, format, res) => {
       '-',
       '--no-part',
       '--no-check-certificates',
-     // '--merge-output-format',
-     // isSoundCloudUrl(videoUrl) ? 'mp3' : 'mp4',
+      '--newline', // helps yt-dlp flush progress lines
     ];
 
     if (options.addHeader) {
@@ -503,51 +517,128 @@ const streamDownload = async (url, format, res) => {
     if (options.userAgent) args.push('--user-agent', options.userAgent);
     if (options.proxy) args.push('--proxy', options.proxy);
     if (options.referer) args.push('--referer', options.referer);
-
     if (isInstagramUrl(videoUrl) && process.env.INSTAGRAM_COOKIES) {
       args.push('--add-header', `cookie: ${process.env.INSTAGRAM_COOKIES}`);
     }
 
+    // Spawn the streaming process immediately
     const ytdlProc = spawn(ytdlPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    // Pipe process stdout directly to response so download starts ASAP
     ytdlProc.stdout.pipe(res);
+
+    // Log stderr for debugging
     ytdlProc.stderr.on('data', (data) => {
       console.error('[yt-dlp stderr]', data.toString());
     });
 
     ytdlProc.on('error', (err) => {
       console.error('Failed to spawn yt-dlp:', err);
+      // If headers haven't been sent yet, send a 500. Usually headers were flushed.
       if (!res.headersSent) res.status(500).end('Download failed');
+      const entry = downloads.get(streamId);
+      if (entry) {
+        entry.status = 'error';
+        entry.error = err.message;
+      }
     });
 
     ytdlProc.on('close', (code) => {
-      if (code !== 0 && !res.headersSent) {
-        res.status(500).end('Download failed');
+      const entry = downloads.get(streamId);
+      if (code === 0) {
+        if (entry) entry.status = 'completed';
+        try {
+          if (!res.writableEnded) res.end();
+        } catch (e) {}
+      } else {
+        // If no bytes were ever written, send a 500 (but most clients will already see a truncated file)
+        if (!res.headersSent) {
+          res.status(500).end('Download failed');
+        } else {
+          try {
+            if (!res.writableEnded) res.end();
+          } catch (e) {}
+        }
+        if (entry) {
+          entry.status = 'error';
+          entry.error = `yt-dlp exit code ${code}`;
+        }
       }
     });
 
+    // Kill child when client disconnects
     res.on('close', () => {
-      if (!ytdlProc.killed) ytdlProc.kill('SIGTERM');
+      try {
+        if (ytdlProc && !ytdlProc.killed) ytdlProc.kill('SIGTERM');
+      } catch (e) {}
     });
 
-    res.setTimeout(300000, () => {
-      if (!res.headersSent) {
-        res.status(504).end('Download timeout');
-        ytdlProc.kill('SIGTERM');
+    // Fire-and-forget metadata fetch: run dumpSingleJson in background and attach to downloads map
+    (async () => {
+      try {
+        const metaOptions = buildYtdlOptions(url, {
+          dumpSingleJson: true,
+          skipDownload: true,
+        });
+
+        // small timeout wrapper — we don't want background metadata fetch to hang forever
+        const metaPromise = ytdl(videoUrl, metaOptions);
+        const metaTimeoutMs = parseInt(process.env.META_FETCH_TIMEOUT_MS || '15000', 10); // default 15s
+        const metadata = await Promise.race([
+          metaPromise,
+          new Promise((_, rej) => setTimeout(() => rej(new Error('meta timeout')), metaTimeoutMs)),
+        ]);
+
+        // Attach metadata to downloads map (so you can serve it later)
+        const entry = downloads.get(streamId);
+        if (entry) {
+          entry.metadata = {
+            id: metadata.id || videoUrl,
+            title: metadata.title || null,
+            thumbnail: metadata.thumbnail || null,
+            duration: metadata.duration || null,
+            uploader: metadata.uploader || null,
+            view_count: metadata.view_count || null,
+            filesize: metadata.filesize || metadata.filesize_approx || null,
+            extractor: metadata.extractor_key || null,
+            formats: metadata.formats ? metadata.formats.map((f) => ({ format_id: f.format_id, ext: f.ext, width: f.width, height: f.height, abr: f.abr })) : null,
+          };
+
+          // Optionally update Content-Disposition filename if headers haven't been flushed (rare)
+          // Note: headers cannot be changed after first bytes are sent. We only set a fallback earlier.
+          console.log(`Metadata fetched for stream ${streamId}:`, entry.metadata.title || entry.metadata.id);
+        }
+      } catch (metaErr) {
+        // metadata fetch failed or timed out — that's okay, streaming already started
+        console.warn(`Metadata fetch failed for ${streamId}:`, metaErr && metaErr.message);
+        const entry = downloads.get(streamId);
+        if (entry) {
+          entry.metadata = { error: metaErr && metaErr.message };
+        }
       }
-    });
+    })();
   } catch (err) {
-    if (err.message.includes('login required') || err.message.includes('rate-limit reached')) {
-      res.status(401).json({
-        error: isSoundCloudUrl(videoUrl) ? 'SoundCloud authentication may be required' : 'Instagram authentication required',
-      });
-    } else {
-      console.error('Streaming error:', err);
-      if (!res.headersSent) {
+    // If an exception occurs before streaming starts
+    console.error('Streaming error:', err);
+    const entry = downloads.get(streamId);
+    if (entry) {
+      entry.status = 'error';
+      entry.error = err.message;
+    }
+    if (!res.headersSent) {
+      if (err.message && (err.message.includes('login required') || err.message.includes('rate-limit reached'))) {
+        res.status(401).json({
+          error: isSoundCloudUrl(videoUrl) ? 'SoundCloud authentication may be required' : 'Instagram authentication required',
+        });
+      } else {
         res.status(500).json({ error: err.message || 'Stream failed' });
       }
+    } else {
+      try {
+        if (!res.writableEnded) res.end();
+      } catch (e) {}
     }
   }
 };
