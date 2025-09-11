@@ -1,4 +1,4 @@
-const path = require('path');
+ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
@@ -65,8 +65,6 @@ const isFacebookUrl = (url) => /facebook\.com|fb\.watch/i.test(url);
 const isSoundCloudUrl = (url) => /soundcloud\.com/i.test(url);
 const getVideoUrl = (input) => (typeof input === 'string' ? input : input.url);
 
-// ... (other imports and constants remain unchanged)
-
 const buildYtdlOptions = (input, extraOptions = {}) => {
   const config = typeof input === 'object' ? input.config || {} : {};
   const platform = typeof input === 'object' ? input.platform || (isSoundCloudUrl(getVideoUrl(input)) ? 'soundcloud' : 'default') : 'default';
@@ -90,15 +88,6 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
     }
   }
 
-  if (isFacebookUrl(videoUrl)) {
-    if (process.env.FACEBOOK_COOKIES) {
-      baseOptions.addHeader = baseOptions.addHeader || [];
-      baseOptions.addHeader.push(`cookie: ${process.env.FACEBOOK_COOKIES}`);
-    }
-    // Force mobile URL for better compatibility with reels
-    baseOptions.forceMobileUrl = true;
-  }
-
   if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
     baseOptions.addHeader = [`cookie: ${baseOptions.cookies.trim()}`];
     delete baseOptions.cookies;
@@ -111,7 +100,7 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   return { ...baseOptions, ...extraOptions };
 };
 
-// Updated calculateFileSize for accurate video and audio support
+// Updated calculateFileSize for audio support
 const calculateFileSize = (format, duration) => {
   if (format.filesize) return format.filesize;
   if (format.filesize_approx) return format.filesize_approx;
@@ -122,12 +111,12 @@ const calculateFileSize = (format, duration) => {
   }
 
   if (totalBitrate && duration) {
-    return (totalBitrate * 1000 * duration) / 8 * 0.8; // Apply 20% compression factor
+    return (totalBitrate * 1000 * duration) / 8;
   }
 
   // Fallback for audio-only (e.g., SoundCloud)
   if (format.vcodec === 'none' && duration) {
-    const defaultAudioBitrate = 96; // Reduced from 128kbps
+    const defaultAudioBitrate = 128; // Default to 128kbps for audio
     return (defaultAudioBitrate * 1000 * duration) / 8;
   }
 
@@ -135,22 +124,19 @@ const calculateFileSize = (format, duration) => {
   const height = format.height || 720;
   const estimatedBitrate = estimateBitrateByRes(height);
   if (estimatedBitrate && duration) {
-    return (estimatedBitrate * 1000 * duration) / 8 * 0.8;
+    return (estimatedBitrate * 1000 * duration) / 8;
   }
 
   return null;
 };
 
-// Updated bitrate estimation with realistic values
 const estimateBitrateByRes = (height) => {
-  if (height >= 2160) return 8000; // 4K
-  if (height >= 1080) return 5000; // Reduced from 5000kbps
-  if (height >= 720) return 2500;  // Reduced from 2500kbps
-  if (height >= 480) return 1000;   // Reduced from 1000kbps
-  return 500;                      // Reduced from 500kbps
+  if (height >= 1080) return 5000;
+  if (height >= 720) return 2500;
+  if (height >= 480) return 1000;
+  return 500;
 };
 
-// Updated for adaptive formats with compression factor
 const getEstimatedSizeForAdaptive = (formats, duration) => {
   const bestVideo = formats
     .filter((f) => f.vcodec !== 'none' && f.acodec === 'none')
@@ -163,12 +149,12 @@ const getEstimatedSizeForAdaptive = (formats, duration) => {
   const audioSize = bestAudio ? calculateFileSize(bestAudio, duration) : null;
 
   if (videoSize && audioSize) {
-    return (videoSize + audioSize) * 0.9; // Apply 10% reduction for adaptive format overhead
+    return videoSize + audioSize;
   }
 
   if (duration) {
     const defaultBitrate = estimateBitrateByRes(bestVideo?.height || 720);
-    return (defaultBitrate * 1000 * duration) / 8 * 0.8;
+    return (defaultBitrate * 1000 * duration) / 8;
   }
 
   return null;
@@ -198,20 +184,7 @@ const getFormats = async (url) => {
       preferFreeFormats: true,
     });
 
-    // Try mobile URL for Facebook if initial attempt fails
-    let info;
-    try {
-      info = await ytdl(videoUrl, options);
-    } catch (error) {
-      if (isFacebookUrl(videoUrl) && error.message.includes('Cannot parse data')) {
-        console.warn(`Retrying Facebook URL with mobile version: ${videoUrl}`);
-        const mobileUrl = videoUrl.replace('www.facebook.com', 'm.facebook.com');
-        info = await ytdl(mobileUrl, { ...options, forceMobileUrl: true });
-      } else {
-        throw error;
-      }
-    }
-
+    const info = await ytdl(videoUrl, options);
     const duration = info.duration;
 
     let formats = isSoundCloudUrl(videoUrl)
@@ -227,8 +200,8 @@ const getFormats = async (url) => {
 
       if (!filesize && duration) {
         const height = f.height || 720;
-        const estimatedBitrate = isSoundCloudUrl(videoUrl) ? 96 : estimateBitrateByRes(height);
-        filesize = (estimatedBitrate * 1000 * duration) / 8 * 0.8;
+        const estimatedBitrate = isSoundCloudUrl(videoUrl) ? 128 : estimateBitrateByRes(height);
+        filesize = (estimatedBitrate * 1000 * duration) / 8;
       }
 
       return {
@@ -240,7 +213,6 @@ const getFormats = async (url) => {
       };
     });
   } catch (error) {
-    console.error('Error in getFormats:', error.message);
     throw new Error('Failed to get formats: ' + error.message);
   }
 };
@@ -257,19 +229,7 @@ const getVideoPreview = async (url) => {
         skipDownload: true,
       });
 
-      let info;
-      try {
-        info = await ytdl(videoUrl, options);
-      } catch (error) {
-        if (isFacebookUrl(videoUrl) && error.message.includes('Cannot parse data')) {
-          console.warn(`Retrying Facebook URL with mobile version: ${videoUrl}`);
-          const mobileUrl = videoUrl.replace('www.facebook.com', 'm.facebook.com');
-          info = await ytdl(mobileUrl, { ...options, forceMobileUrl: true });
-        } else {
-          throw error;
-        }
-      }
-
+      const info = await ytdl(videoUrl, options);
       let fileSize = info.filesize || info.filesize_approx;
 
       if (!fileSize) {
@@ -286,8 +246,8 @@ const getVideoPreview = async (url) => {
       }
 
       if (!fileSize && info.duration) {
-        const defaultBitrate = isSoundCloudUrl(videoUrl) ? 96 : estimateBitrateByRes(720);
-        fileSize = (defaultBitrate * 1000 * info.duration) / 8 * 0.8;
+        const defaultBitrate = isSoundCloudUrl(videoUrl) ? 128 : estimateBitrateByRes(720);
+        fileSize = (defaultBitrate * 1000 * info.duration) / 8;
       }
 
       return {
@@ -301,7 +261,6 @@ const getVideoPreview = async (url) => {
         fileSize: fileSize || null,
       };
     } catch (error) {
-      console.error(`Error in getVideoPreview (attempt ${retries + 1}/${maxRetries + 1}):`, error.message);
       retries++;
       if (retries > maxRetries) {
         throw new Error('Failed to get video preview: ' + error.message);
@@ -311,7 +270,6 @@ const getVideoPreview = async (url) => {
   }
 };
 
-// ... (other functions like getStreamUrl, startDownload, etc., remain unchanged unless specified)
 const getStreamUrl = async (url, format) => {
   const videoUrl = getVideoUrl(url);
   const options = buildYtdlOptions(url, {
