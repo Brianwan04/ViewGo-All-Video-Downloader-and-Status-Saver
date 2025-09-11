@@ -100,7 +100,7 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   return { ...baseOptions, ...extraOptions };
 };
 
-// Updated calculateFileSize for accurate video and audio support
+// Updated calculateFileSize for audio support
 const calculateFileSize = (format, duration) => {
   if (format.filesize) return format.filesize;
   if (format.filesize_approx) return format.filesize_approx;
@@ -111,13 +111,12 @@ const calculateFileSize = (format, duration) => {
   }
 
   if (totalBitrate && duration) {
-    // Apply a 20% reduction to account for modern codec efficiency
-    return (totalBitrate * 1000 * duration) / 8 * 0.8;
+    return (totalBitrate * 1000 * duration) / 8;
   }
 
   // Fallback for audio-only (e.g., SoundCloud)
   if (format.vcodec === 'none' && duration) {
-    const defaultAudioBitrate = 96; // Reduced from 128kbps to 96kbps for audio
+    const defaultAudioBitrate = 128; // Default to 128kbps for audio
     return (defaultAudioBitrate * 1000 * duration) / 8;
   }
 
@@ -125,22 +124,19 @@ const calculateFileSize = (format, duration) => {
   const height = format.height || 720;
   const estimatedBitrate = estimateBitrateByRes(height);
   if (estimatedBitrate && duration) {
-    return (estimatedBitrate * 1000 * duration) / 8 * 0.8; // Apply compression factor
+    return (estimatedBitrate * 1000 * duration) / 8;
   }
 
   return null;
 };
 
-// Updated bitrate estimation with more realistic values
 const estimateBitrateByRes = (height) => {
-  if (height >= 2160) return 8000; // 4K
-  if (height >= 1080) return 2000; // Reduced from 5000kbps
-  if (height >= 720) return 1200;  // Reduced from 2500kbps
-  if (height >= 480) return 600;   // Reduced from 1000kbps
-  return 300;                      // Reduced from 500kbps
+  if (height >= 1080) return 5000;
+  if (height >= 720) return 2500;
+  if (height >= 480) return 1000;
+  return 500;
 };
 
-// Updated for adaptive formats with compression factor
 const getEstimatedSizeForAdaptive = (formats, duration) => {
   const bestVideo = formats
     .filter((f) => f.vcodec !== 'none' && f.acodec === 'none')
@@ -153,12 +149,12 @@ const getEstimatedSizeForAdaptive = (formats, duration) => {
   const audioSize = bestAudio ? calculateFileSize(bestAudio, duration) : null;
 
   if (videoSize && audioSize) {
-    return (videoSize + audioSize) * 0.9; // Apply 10% reduction for adaptive format overhead
+    return videoSize + audioSize;
   }
 
   if (duration) {
     const defaultBitrate = estimateBitrateByRes(bestVideo?.height || 720);
-    return (defaultBitrate * 1000 * duration) / 8 * 0.8;
+    return (defaultBitrate * 1000 * duration) / 8;
   }
 
   return null;
@@ -204,8 +200,8 @@ const getFormats = async (url) => {
 
       if (!filesize && duration) {
         const height = f.height || 720;
-        const estimatedBitrate = isSoundCloudUrl(videoUrl) ? 96 : estimateBitrateByRes(height); // Use 96kbps for audio
-        filesize = (estimatedBitrate * 1000 * duration) / 8 * 0.8;
+        const estimatedBitrate = isSoundCloudUrl(videoUrl) ? 128 : estimateBitrateByRes(height);
+        filesize = (estimatedBitrate * 1000 * duration) / 8;
       }
 
       return {
@@ -217,7 +213,6 @@ const getFormats = async (url) => {
       };
     });
   } catch (error) {
-    console.error('Error in getFormats:', error.message);
     throw new Error('Failed to get formats: ' + error.message);
   }
 };
@@ -251,8 +246,8 @@ const getVideoPreview = async (url) => {
       }
 
       if (!fileSize && info.duration) {
-        const defaultBitrate = isSoundCloudUrl(videoUrl) ? 96 : estimateBitrateByRes(720); // Use 96kbps for audio
-        fileSize = (defaultBitrate * 1000 * info.duration) / 8 * 0.8;
+        const defaultBitrate = isSoundCloudUrl(videoUrl) ? 128 : estimateBitrateByRes(720);
+        fileSize = (defaultBitrate * 1000 * info.duration) / 8;
       }
 
       return {
@@ -266,7 +261,6 @@ const getVideoPreview = async (url) => {
         fileSize: fileSize || null,
       };
     } catch (error) {
-      console.error('Error in getVideoPreview:', error.message);
       retries++;
       if (retries > maxRetries) {
         throw new Error('Failed to get video preview: ' + error.message);
