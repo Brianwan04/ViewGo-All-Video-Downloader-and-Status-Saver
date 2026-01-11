@@ -1,9 +1,12 @@
- const path = require('path');
+const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { spawn } = require('child_process');
 const { v4: uuidv4 } = require('uuid');
 const EventEmitter = require('events');
 const ytdl = require('yt-dlp-exec');
+const http = require('http');
+const https = require('https');
 const ytdlPath = path.join(__dirname, '../bin/yt-dlp');
 const { validateUrl } = require('../utils/validation');
 
@@ -30,7 +33,7 @@ const PLATFORM_CONFIGS = {
     userAgent:
       'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
     referer: 'https://www.instagram.com/',
-    forceIpv4: false, // Adjusted for better compatibility
+    forceIpv4: false,
   },
   facebook: {
     userAgent:
@@ -41,6 +44,7 @@ const PLATFORM_CONFIGS = {
         skip_web_fallback: true,
       },
     },
+    referer: 'https://www.facebook.com/',
   },
   soundcloud: {
     userAgent:
@@ -48,20 +52,20 @@ const PLATFORM_CONFIGS = {
     referer: 'https://soundcloud.com/',
     extractorArgs: {
       soundcloud: {
-        format: 'mp3', // Prefer MP3 for audio
+        format: 'mp3',
       },
     },
   },
   twitter: {
-  userAgent:
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  referer: 'https://twitter.com/',
-  extractorArgs: {
-    twitter: {
-      skip_webpage: true,
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    referer: 'https://twitter.com/',
+    extractorArgs: {
+      twitter: {
+        skip_webpage: true,
+      },
     },
   },
-},
   default: {
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
@@ -73,12 +77,51 @@ const PLATFORM_CONFIGS = {
 const isInstagramUrl = (url) => /instagram\.com/i.test(url);
 const isFacebookUrl = (url) => /facebook\.com|fb\.watch/i.test(url);
 const isSoundCloudUrl = (url) => /soundcloud\.com/i.test(url);
+const isXUrl = (url) => /(x\.com|twitter\.com)/i.test(url);
+const isTikTokShort = (url) => /vm\.tiktok\.com/i.test(url);
 const getVideoUrl = (input) => (typeof input === 'string' ? input : input.url);
 
+// --- Redirect resolver for shortlinks (handles vm.tiktok etc) ---
+function resolveRedirect(originalUrl, maxRedirects = 6, timeoutMs = 8000) {
+  return new Promise((resolve) => {
+    try {
+      const normalized = originalUrl.startsWith('http') ? originalUrl : `https://${originalUrl}`;
+      let redirects = 0;
+
+      const doRequest = (u) => {
+        if (redirects >= maxRedirects) return resolve(u);
+        const useHttps = u.startsWith('https://');
+        const client = useHttps ? https : http;
+        const req = client.request(u, { method: 'HEAD', timeout: timeoutMs }, (res) => {
+          const status = res.statusCode;
+          if (status >= 300 && status < 400 && res.headers.location) {
+            redirects++;
+            const next = new URL(res.headers.location, u).toString();
+            doRequest(next);
+          } else {
+            resolve(u);
+          }
+        });
+        req.on('timeout', () => {
+          req.destroy();
+          resolve(normalized);
+        });
+        req.on('error', () => resolve(normalized));
+        req.end();
+      };
+
+      doRequest(normalized);
+    } catch (e) {
+      resolve(originalUrl);
+    }
+  });
+}
+
+// --- Options builder (adds referer, headers, cookies, bearer) ---
 const buildYtdlOptions = (input, extraOptions = {}) => {
   const config = typeof input === 'object' ? input.config || {} : {};
-  const platform = typeof input === 'object' ? input.platform || (isSoundCloudUrl(getVideoUrl(input)) ? 'soundcloud' : 'default') : 'default';
   const videoUrl = getVideoUrl(input);
+  const platform = typeof input === 'object' ? input.platform || (isSoundCloudUrl(videoUrl) ? 'soundcloud' : 'default') : 'default';
 
   const baseOptions = {
     noCheckCertificates: true,
@@ -88,19 +131,38 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
     ...config,
   };
 
-  if (isInstagramUrl(videoUrl)) {
-    if (process.env.INSTAGRAM_COOKIES) {
-      baseOptions.addHeader = baseOptions.addHeader || [];
-      baseOptions.addHeader.push(`cookie: ${process.env.INSTAGRAM_COOKIES}`);
-    }
-    if (process.env.INSTAGRAM_PROXY) {
-      baseOptions.proxy = process.env.INSTAGRAM_PROXY;
-    }
+  baseOptions.addHeader = baseOptions.addHeader || [];
+
+  // referer/header for X/Twitter
+  if (isXUrl(videoUrl)) {
+    baseOptions.referer = baseOptions.referer || 'https://x.com';
+    baseOptions.addHeader.push(`Referer: ${baseOptions.referer}`);
+  } else if (isTikTokShort(videoUrl) || /tiktok\.com/i.test(videoUrl)) {
+    baseOptions.referer = baseOptions.referer || 'https://www.tiktok.com/';
+    baseOptions.addHeader.push(`Referer: ${baseOptions.referer}`);
+  } else if (baseOptions.referer) {
+    baseOptions.addHeader.push(`Referer: ${baseOptions.referer}`);
   }
 
-  if (baseOptions.cookies && baseOptions.cookies.trim() !== '') {
-    baseOptions.addHeader = [`cookie: ${baseOptions.cookies.trim()}`];
+  // cookie path env var (point to cookies file path)
+  if (process.env.YTDLP_COOKIE_PATH && process.env.YTDLP_COOKIE_PATH.trim() !== '') {
+    baseOptions.cookies = process.env.YTDLP_COOKIE_PATH;
+  }
+
+  // legacy support: INSTAGRAM_COOKIES environment -> header
+  if (isInstagramUrl(videoUrl) && process.env.INSTAGRAM_COOKIES) {
+    baseOptions.addHeader.push(`cookie: ${process.env.INSTAGRAM_COOKIES}`);
+  }
+
+  // If cookies passed as string, convert to addHeader
+  if (baseOptions.cookies && typeof baseOptions.cookies === 'string') {
+    baseOptions.addHeader.push(`cookie: ${baseOptions.cookies.trim()}`);
     delete baseOptions.cookies;
+  }
+
+  // Support bearer token for X download if provided
+  if (process.env.YTDLP_AUTH_BEARER && process.env.YTDLP_AUTH_BEARER.trim() !== '') {
+    baseOptions.addHeader.push(`Authorization: Bearer ${process.env.YTDLP_AUTH_BEARER.trim()}`);
   }
 
   if (baseOptions.proxy && baseOptions.proxy.trim() === '') {
@@ -110,7 +172,7 @@ const buildYtdlOptions = (input, extraOptions = {}) => {
   return { ...baseOptions, ...extraOptions };
 };
 
-// Updated calculateFileSize for audio support
+// --- filesize helpers (kept original logic) ---
 const calculateFileSize = (format, duration) => {
   if (format.filesize) return format.filesize;
   if (format.filesize_approx) return format.filesize_approx;
@@ -124,13 +186,11 @@ const calculateFileSize = (format, duration) => {
     return (totalBitrate * 1000 * duration) / 8;
   }
 
-  // Fallback for audio-only (e.g., SoundCloud)
   if (format.vcodec === 'none' && duration) {
-    const defaultAudioBitrate = 128; // Default to 128kbps for audio
+    const defaultAudioBitrate = 128;
     return (defaultAudioBitrate * 1000 * duration) / 8;
   }
 
-  // Fallback for video based on resolution
   const height = format.height || 720;
   const estimatedBitrate = estimateBitrateByRes(height);
   if (estimatedBitrate && duration) {
@@ -186,82 +246,89 @@ const getBestFormatForSizeCalculation = (formats) => {
   )[0];
 };
 
+// --- getFormats: resolves redirects and returns progressive formats ---
 const getFormats = async (url) => {
   try {
-    const videoUrl = getVideoUrl(url);
-    const options = buildYtdlOptions(url, {
+    const original = getVideoUrl(url);
+    const resolved = await resolveRedirect(original);
+    const options = buildYtdlOptions({ url: resolved }, {
       dumpSingleJson: true,
       preferFreeFormats: true,
+      skipDownload: true,
     });
 
-    const info = await ytdl(videoUrl, options);
+    const info = await ytdl(resolved, options);
     const duration = info.duration;
 
-    let formats = isSoundCloudUrl(videoUrl)
-      ? info.formats.filter((f) => f.acodec !== 'none' && f.vcodec === 'none') // Audio-only for SoundCloud
-      : info.formats.filter((f) => f.vcodec !== 'none' && f.acodec !== 'none'); // Progressive for others
+    let formats = isSoundCloudUrl(resolved)
+      ? info.formats.filter((f) => f.acodec !== 'none' && f.vcodec === 'none')
+      : info.formats.filter((f) => f.vcodec !== 'none' && f.acodec !== 'none');
 
     return formats.map((f) => {
       let filesize = calculateFileSize(f, duration);
 
-      if (!filesize && (isFacebookUrl(videoUrl) || isInstagramUrl(videoUrl))) {
+      if (!filesize && (isFacebookUrl(resolved) || isInstagramUrl(resolved))) {
         filesize = getEstimatedSizeForAdaptive(info.formats, duration);
       }
 
       if (!filesize && duration) {
         const height = f.height || 720;
-        const estimatedBitrate = isSoundCloudUrl(videoUrl) ? 128 : estimateBitrateByRes(height);
+        const estimatedBitrate = isSoundCloudUrl(resolved) ? 128 : estimateBitrateByRes(height);
         filesize = (estimatedBitrate * 1000 * duration) / 8;
       }
 
       return {
         format_id: f.format_id,
-        ext: f.ext || (isSoundCloudUrl(videoUrl) ? 'mp3' : 'mp4'),
-        resolution: isSoundCloudUrl(videoUrl) ? f.abr ? `${f.abr}kbps` : 'audio' : f.resolution || `${f.height}p` || 'unknown',
-        format_note: f.format_note || (isSoundCloudUrl(videoUrl) ? 'audio' : 'video'),
+        ext: f.ext || (isSoundCloudUrl(resolved) ? 'mp3' : 'mp4'),
+        resolution: isSoundCloudUrl(resolved) ? (f.abr ? `${f.abr}kbps` : 'audio') : f.resolution || `${f.height}p` || 'unknown',
+        format_note: f.format_note || (isSoundCloudUrl(resolved) ? 'audio' : 'video'),
         filesize: filesize || null,
       };
     });
   } catch (error) {
-    throw new Error('Failed to get formats: ' + error.message);
+    throw new Error('Failed to get formats: ' + (error.message || error));
   }
 };
 
+// --- getVideoPreview (resolves shortlinks + retries) ---
 const getVideoPreview = async (url) => {
   const maxRetries = 3;
   let retries = 0;
-  const videoUrl = getVideoUrl(url);
+  const original = getVideoUrl(url);
 
   while (retries <= maxRetries) {
     try {
-      const options = buildYtdlOptions(url, {
+      const resolved = await resolveRedirect(original);
+      const options = buildYtdlOptions({ url: resolved }, {
         dumpSingleJson: true,
         skipDownload: true,
       });
 
-      const info = await ytdl(videoUrl, options);
+      const info = await ytdl(resolved, options);
+
       let fileSize = info.filesize || info.filesize_approx;
 
       if (!fileSize) {
-        const bestFormat = isSoundCloudUrl(videoUrl)
+        const bestFormat = isSoundCloudUrl(resolved)
           ? info.formats.filter((f) => f.acodec !== 'none' && f.vcodec === 'none').sort((a, b) => (b.abr || 0) - (a.abr || 0))[0]
           : getBestFormatForSizeCalculation(info.formats);
+
         if (bestFormat) {
           fileSize = calculateFileSize(bestFormat, info.duration);
         }
       }
 
-      if (!fileSize && (isFacebookUrl(videoUrl) || isInstagramUrl(videoUrl))) {
+      if (!fileSize && (isFacebookUrl(resolved) || isInstagramUrl(resolved))) {
         fileSize = getEstimatedSizeForAdaptive(info.formats, info.duration);
       }
 
       if (!fileSize && info.duration) {
-        const defaultBitrate = isSoundCloudUrl(videoUrl) ? 128 : estimateBitrateByRes(720);
+        const defaultBitrate = isSoundCloudUrl(resolved) ? 128 : estimateBitrateByRes(720);
         fileSize = (defaultBitrate * 1000 * info.duration) / 8;
       }
 
       return {
-        id: info.id || videoUrl,
+        id: info.id || resolved,
         title: info.title || 'Untitled',
         thumbnail: info.thumbnail || null,
         duration: info.duration,
@@ -272,22 +339,26 @@ const getVideoPreview = async (url) => {
       };
     } catch (error) {
       retries++;
+      // give X/Twitter cookie retry a chance if env set
+      if (retries <= maxRetries) await new Promise((r) => setTimeout(r, 1000 * retries));
       if (retries > maxRetries) {
-        throw new Error('Failed to get video preview: ' + error.message);
+        throw new Error('Failed to get video preview: ' + (error.message || error));
       }
-      await new Promise((resolve) => setTimeout(resolve, 1000 * retries));
     }
   }
 };
 
+// --- getStreamUrl resolves redirect and picks HLS or direct url ---
 const getStreamUrl = async (url, format) => {
-  const videoUrl = getVideoUrl(url);
-  const options = buildYtdlOptions(url, {
-    format: format || (isSoundCloudUrl(videoUrl) ? 'bestaudio[ext=mp3]' : 'best'),
+  const original = getVideoUrl(url);
+  const resolved = await resolveRedirect(original);
+  const options = buildYtdlOptions({ url: resolved }, {
+    format: format || (isSoundCloudUrl(resolved) ? 'bestaudio[ext=mp3]' : 'best'),
     dumpSingleJson: true,
+    skipDownload: true,
   });
 
-  const info = await ytdl(videoUrl, options);
+  const info = await ytdl(resolved, options);
 
   const hlsFormat = info.formats.find(
     (f) =>
@@ -317,7 +388,7 @@ const getStreamUrl = async (url, format) => {
     }
   }
 
-  const preferred = isSoundCloudUrl(videoUrl)
+  const preferred = isSoundCloudUrl(resolved)
     ? info.formats.filter((f) => f.acodec !== 'none' && f.vcodec === 'none').sort((a, b) => (b.abr || 0) - (a.abr || 0))[0]
     : info.formats.filter((f) => f.protocol === 'https' && f.vcodec !== 'none' && f.acodec !== 'none').sort((a, b) => (b.filesize || 0) - (a.filesize || 0))[0];
 
@@ -333,17 +404,19 @@ const getStreamUrl = async (url, format) => {
   throw new Error('No suitable stream format found');
 };
 
+// --- startDownload: improved handling for adaptive downloads (uses merge flags) ---
 const startDownload = async (url, format) => {
   const id = uuidv4();
   const output = path.join(DOWNLOAD_DIR, `${id}.%(ext)s`);
-  const videoUrl = getVideoUrl(url);
+  const original = getVideoUrl(url);
+  const resolved = await resolveRedirect(original);
 
   const progressEmitter = new DownloadProgressEmitter();
   progressEmitters.set(id, progressEmitter);
 
   downloads.set(id, {
     id,
-    url: videoUrl,
+    url: resolved,
     format,
     status: 'downloading',
     progress: 0,
@@ -353,13 +426,31 @@ const startDownload = async (url, format) => {
 
   (async () => {
     try {
-      const options = buildYtdlOptions(url);
-      const args = [videoUrl, '-o', output];
+      // Inspect formats to decide flags for adaptive
+      const infoOptions = buildYtdlOptions({ url: resolved }, { dumpSingleJson: true, skipDownload: true });
+      let info;
+      try {
+        info = await ytdl(resolved, infoOptions);
+      } catch (e) {
+        // proceed anyway; yt-dlp may still succeed when doing full download
+        info = null;
+      }
+
+      const isAdaptive = info && info.formats && info.formats.some((f) => f.vcodec !== 'none' && f.acodec === 'none') &&
+                         info.formats.some((f) => f.vcodec === 'none' && f.acodec !== 'none');
+
+      const options = buildYtdlOptions({ url: resolved });
+      const args = [resolved, '-o', output];
 
       if (format) {
         args.push('-f', format);
-      } else if (isSoundCloudUrl(videoUrl)) {
+      } else if (isSoundCloudUrl(resolved)) {
         args.push('-f', 'bestaudio[ext=mp3]');
+      }
+
+      // For adaptive downloads prefer ffmpeg merge
+      if (isAdaptive) {
+        args.push('--hls-prefer-ffmpeg', '--merge-output-format', 'mp4', '--no-part');
       }
 
       if (options.cookies) args.push('--cookies', options.cookies);
@@ -370,7 +461,7 @@ const startDownload = async (url, format) => {
         options.addHeader.forEach((hdr) => args.push('--add-header', hdr));
       }
 
-      if (isSoundCloudUrl(videoUrl)) {
+      if (isSoundCloudUrl(resolved)) {
         args.push('--merge-output-format', 'mp3');
       }
 
@@ -378,7 +469,7 @@ const startDownload = async (url, format) => {
 
       ytdlProcess.stderr.on('data', (data) => {
         const line = data.toString();
-        const match = line.match(/download\s+(\d+\.\d+)%/);
+        const match = line.match(/download\s+(\d+\.\d+)%/i);
         if (match) {
           const progress = parseFloat(match[1]);
           const download = downloads.get(id);
@@ -419,6 +510,7 @@ const startDownload = async (url, format) => {
   return id;
 };
 
+// --- SSE progress setup (unchanged) ---
 const setupProgressStream = (id, res) => {
   const progressEmitter = progressEmitters.get(id);
   if (!progressEmitter) return res.status(404).end();
@@ -473,164 +565,194 @@ const scheduleFileDeletion = (filePath) => {
   }, retentionMinutes * 60 * 1000);
 };
 
+// --- streamDownload: progressive -> pipe stdout, adaptive -> temp file + stream merged output ---
 const streamDownload = async (url, format, res) => {
-  const videoUrl = getVideoUrl(url);
+  const original = getVideoUrl(url);
+  const resolved = await resolveRedirect(original);
 
-  // Generate a stream id so we can store metadata / status server-side
+  // Generate a stream id
   const streamId = uuidv4();
 
-  // create a downloads entry so metadata can be attached later
   downloads.set(streamId, {
     id: streamId,
-    url: videoUrl,
+    url: resolved,
     format,
     status: 'streaming',
     progress: 0,
     filePath: null,
     error: null,
-    metadata: null, // will be filled asynchronously
+    metadata: null,
   });
 
   try {
-    // Build minimal options for the streaming child (do not dumpSingleJson here)
-    const options = buildYtdlOptions(url, {
-      // do not request dumpSingleJson here — that's what caused the delay
-      format: format || (isSoundCloudUrl(videoUrl) ? 'bestaudio[ext=mp3]' : 'best'),
-    });
+    // Quick metadata/info check to decide adaptive vs progressive
+    const infoOptions = buildYtdlOptions({ url: resolved }, { dumpSingleJson: true, skipDownload: true });
+    let info;
+    try {
+      info = await ytdl(resolved, infoOptions);
+    } catch (e) {
+      info = null; // proceed; we'll try streaming anyway
+    }
 
-    // Prepare a safe fallback filename (we don't wait for metadata to set a pretty name)
-    const fallbackName = `download-${streamId}`; // safe and unique
-    const extension = isSoundCloudUrl(videoUrl) ? 'mp3' : 'mp4';
+    const hasAdaptive = info && info.formats &&
+      info.formats.some((f) => f.vcodec !== 'none' && f.acodec === 'none') &&
+      info.formats.some((f) => f.vcodec === 'none' && f.acodec !== 'none');
 
-    // Send headers early so frontends and proxies see activity
-    res.setHeader('Content-Type', isSoundCloudUrl(videoUrl) ? 'audio/mpeg' : 'video/mp4');
+    const fallbackName = `download-${streamId}`;
+    const extension = isSoundCloudUrl(resolved) ? 'mp3' : 'mp4';
+
+    // Send early headers
     res.setHeader('Content-Disposition', `attachment; filename="${fallbackName}.${extension}"`);
-    res.setHeader('X-Stream-Id', streamId); // optional header for later lookup
-    if (typeof res.setTimeout === 'function') res.setTimeout(0); // disable default timeout if possible
-    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+    res.setHeader('X-Stream-Id', streamId);
+    res.setHeader('Cache-Control', 'no-cache');
+    if (typeof res.setTimeout === 'function') res.setTimeout(0);
 
-    // Build args for spawning yt-dlp to stream to stdout
-    const args = [
-      videoUrl,
-      '-f',
-      format || (isSoundCloudUrl(videoUrl) ? 'bestaudio[ext=mp3]' : 'best'),
-      '-o',
-      '-',
-      '--no-part',
-      '--no-check-certificates',
-      '--newline', // helps yt-dlp flush progress lines
-    ];
-
-    if (options.addHeader) {
-      options.addHeader.forEach((hdr) => args.push('--add-header', hdr));
-    }
-    if (options.userAgent) args.push('--user-agent', options.userAgent);
-    if (options.proxy) args.push('--proxy', options.proxy);
-    if (options.referer) args.push('--referer', options.referer);
-    if (isInstagramUrl(videoUrl) && process.env.INSTAGRAM_COOKIES) {
-      args.push('--add-header', `cookie: ${process.env.INSTAGRAM_COOKIES}`);
-    }
-
-    // Spawn the streaming process immediately
-    const ytdlProc = spawn(ytdlPath, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    // Pipe process stdout directly to response so download starts ASAP
-    ytdlProc.stdout.pipe(res);
-
-    // Log stderr for debugging
-    ytdlProc.stderr.on('data', (data) => {
-      console.error('[yt-dlp stderr]', data.toString());
-    });
-
-    ytdlProc.on('error', (err) => {
-      console.error('Failed to spawn yt-dlp:', err);
-      // If headers haven't been sent yet, send a 500. Usually headers were flushed.
-      if (!res.headersSent) res.status(500).end('Download failed');
-      const entry = downloads.get(streamId);
-      if (entry) {
-        entry.status = 'error';
-        entry.error = err.message;
-      }
-    });
-
-    ytdlProc.on('close', (code) => {
-      const entry = downloads.get(streamId);
-      if (code === 0) {
-        if (entry) entry.status = 'completed';
-        try {
-          if (!res.writableEnded) res.end();
-        } catch (e) {}
-      } else {
-        // If no bytes were ever written, send a 500 (but most clients will already see a truncated file)
-        if (!res.headersSent) {
-          res.status(500).end('Download failed');
-        } else {
-          try {
-            if (!res.writableEnded) res.end();
-          } catch (e) {}
-        }
-        if (entry) {
-          entry.status = 'error';
-          entry.error = `yt-dlp exit code ${code}`;
-        }
-      }
-    });
-
-    // Kill child when client disconnects
-    res.on('close', () => {
-      try {
-        if (ytdlProc && !ytdlProc.killed) ytdlProc.kill('SIGTERM');
-      } catch (e) {}
-    });
-
-    // Fire-and-forget metadata fetch: run dumpSingleJson in background and attach to downloads map
+    // Fire-and-forget metadata fetch (if not already available)
     (async () => {
       try {
-        const metaOptions = buildYtdlOptions(url, {
-          dumpSingleJson: true,
-          skipDownload: true,
-        });
-
-        // small timeout wrapper — we don't want background metadata fetch to hang forever
-        const metaPromise = ytdl(videoUrl, metaOptions);
-        const metaTimeoutMs = parseInt(process.env.META_FETCH_TIMEOUT_MS || '15000', 10); // default 15s
-        const metadata = await Promise.race([
-          metaPromise,
-          new Promise((_, rej) => setTimeout(() => rej(new Error('meta timeout')), metaTimeoutMs)),
-        ]);
-
-        // Attach metadata to downloads map (so you can serve it later)
+        if (!info) {
+          const metaOptions = buildYtdlOptions({ url: resolved }, { dumpSingleJson: true, skipDownload: true });
+          info = await ytdl(resolved, metaOptions);
+        }
         const entry = downloads.get(streamId);
         if (entry) {
           entry.metadata = {
-            id: metadata.id || videoUrl,
-            title: metadata.title || null,
-            thumbnail: metadata.thumbnail || null,
-            duration: metadata.duration || null,
-            uploader: metadata.uploader || null,
-            view_count: metadata.view_count || null,
-            filesize: metadata.filesize || metadata.filesize_approx || null,
-            extractor: metadata.extractor_key || null,
-            formats: metadata.formats ? metadata.formats.map((f) => ({ format_id: f.format_id, ext: f.ext, width: f.width, height: f.height, abr: f.abr })) : null,
+            id: info.id || resolved,
+            title: info.title || null,
+            thumbnail: info.thumbnail || null,
+            duration: info.duration || null,
+            uploader: info.uploader || null,
+            view_count: info.view_count || null,
+            filesize: info.filesize || info.filesize_approx || null,
+            extractor: info.extractor_key || null,
+            formats: info.formats ? info.formats.map((f) => ({ format_id: f.format_id, ext: f.ext, width: f.width, height: f.height, abr: f.abr })) : null,
           };
-
-          // Optionally update Content-Disposition filename if headers haven't been flushed (rare)
-          // Note: headers cannot be changed after first bytes are sent. We only set a fallback earlier.
-          console.log(`Metadata fetched for stream ${streamId}:`, entry.metadata.title || entry.metadata.id);
         }
       } catch (metaErr) {
-        // metadata fetch failed or timed out — that's okay, streaming already started
-        console.warn(`Metadata fetch failed for ${streamId}:`, metaErr && metaErr.message);
         const entry = downloads.get(streamId);
-        if (entry) {
-          entry.metadata = { error: metaErr && metaErr.message };
-        }
+        if (entry) entry.metadata = { error: metaErr && metaErr.message };
       }
     })();
+
+    // If not adaptive OR audio-only (SoundCloud) => stream directly to client
+    if (!hasAdaptive || isSoundCloudUrl(resolved)) {
+      res.setHeader('Content-Type', isSoundCloudUrl(resolved) ? 'audio/mpeg' : 'video/mp4');
+
+      const args = [
+        resolved,
+        '-f',
+        format || (isSoundCloudUrl(resolved) ? 'bestaudio[ext=mp3]' : 'best'),
+        '-o',
+        '-',
+        '--no-part',
+        '--no-check-certificates',
+        '--newline',
+      ];
+
+      const options = buildYtdlOptions({ url: resolved });
+      if (options.addHeader) options.addHeader.forEach((h) => args.push('--add-header', h));
+      if (options.userAgent) args.push('--user-agent', options.userAgent);
+      if (options.proxy) args.push('--proxy', options.proxy);
+      if (options.referer) args.push('--referer', options.referer);
+
+      const ytdlProc = spawn(ytdlPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      // Pipe stdout directly
+      ytdlProc.stdout.pipe(res);
+
+      ytdlProc.stderr.on('data', (data) => {
+        console.error('[yt-dlp stderr]', data.toString());
+      });
+
+      ytdlProc.on('close', (code) => {
+        const entry = downloads.get(streamId);
+        if (code === 0) {
+          if (entry) entry.status = 'completed';
+          try {
+            if (!res.writableEnded) res.end();
+          } catch {}
+        } else {
+          if (entry) {
+            entry.status = 'error';
+            entry.error = `yt-dlp exit code ${code}`;
+          }
+          if (!res.headersSent) res.status(500).end('Download failed');
+          else try { if (!res.writableEnded) res.end(); } catch {}
+        }
+      });
+
+      res.on('close', () => {
+        try { if (ytdlProc && !ytdlProc.killed) ytdlProc.kill('SIGTERM'); } catch {}
+      });
+    } else {
+      // Adaptive: download to temp file, let yt-dlp/ffmpeg merge, then stream merged file
+      const tmpFile = path.join(os.tmpdir(), `${streamId}.${extension}`);
+      const args = [
+        resolved,
+        '-f',
+        format || 'bestvideo+bestaudio',
+        '-o',
+        tmpFile,
+        '--hls-prefer-ffmpeg',
+        '--merge-output-format',
+        extension,
+        '--no-part',
+        '--no-check-certificates',
+        '--retries',
+        '3',
+        '--fragment-retries',
+        '3',
+        '--newline',
+      ];
+
+      const options = buildYtdlOptions({ url: resolved });
+      if (options.addHeader) options.addHeader.forEach((h) => args.push('--add-header', h));
+      if (options.userAgent) args.push('--user-agent', options.userAgent);
+      if (options.proxy) args.push('--proxy', options.proxy);
+      if (options.referer) args.push('--referer', options.referer);
+      if (options.cookies) args.push('--cookies', options.cookies);
+
+      const ytdlProc = spawn(ytdlPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      ytdlProc.stderr.on('data', (data) => {
+        // Optional: parse progress lines and emit to progressEmitters if desired
+        console.error('[yt-dlp stderr]', data.toString());
+      });
+
+      ytdlProc.on('close', (code) => {
+        const entry = downloads.get(streamId);
+        if (code === 0 && fs.existsSync(tmpFile)) {
+          if (entry) entry.status = 'completed';
+          // Stream the merged file to client
+          res.setHeader('Content-Type', 'video/mp4');
+          const fileStream = fs.createReadStream(tmpFile);
+          fileStream.pipe(res);
+          fileStream.on('close', () => {
+            try { fs.unlinkSync(tmpFile); } catch (e) {}
+            if (!res.writableEnded) res.end();
+          });
+          fileStream.on('error', (err) => {
+            if (!res.headersSent) res.status(500).end('Failed to stream merged file');
+            else try { if (!res.writableEnded) res.end(); } catch (e) {}
+            if (fs.existsSync(tmpFile)) try { fs.unlinkSync(tmpFile); } catch (e) {}
+            if (entry) { entry.status = 'error'; entry.error = err.message; }
+          });
+        } else {
+          if (entry) {
+            entry.status = 'error';
+            entry.error = `yt-dlp exit code ${code}`;
+          }
+          if (!res.headersSent) res.status(500).end('Download failed');
+          else try { if (!res.writableEnded) res.end(); } catch (e) {}
+          try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch (e) {}
+        }
+      });
+
+      res.on('close', () => {
+        try { if (!ytdlProc.killed) ytdlProc.kill('SIGTERM'); } catch {}
+      });
+    }
   } catch (err) {
-    // If an exception occurs before streaming starts
     console.error('Streaming error:', err);
     const entry = downloads.get(streamId);
     if (entry) {
@@ -640,17 +762,17 @@ const streamDownload = async (url, format, res) => {
     if (!res.headersSent) {
       if (err.message && (err.message.includes('login required') || err.message.includes('rate-limit reached'))) {
         res.status(401).json({
-          error: isSoundCloudUrl(videoUrl) ? 'SoundCloud authentication may be required' : 'Instagram authentication required',
+          error: isSoundCloudUrl(getVideoUrl(url)) ? 'SoundCloud authentication may be required' : 'Authentication required',
         });
       } else {
         res.status(500).json({ error: err.message || 'Stream failed' });
       }
     } else {
-      try {
-        if (!res.writableEnded) res.end();
-      } catch (e) {}
+      try { if (!res.writableEnded) res.end(); } catch (e) {}
     }
   }
+
+  return streamId;
 };
 
 module.exports = {
